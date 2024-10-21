@@ -7,7 +7,7 @@
 #include <ws2spi.h> // For WSCGetProviderPath
 
 #pragma comment(lib, "ws2_32.lib")
-
+//Computer\HKEY_LOCAL_MACHINE\SYSTEM\ControlSet001\Services\LanmanWorkstation\NetworkProvider
 void PrintProtocolInfo(WSAPROTOCOL_INFO& protocolInfo) {
     std::wcout << L"Provider Name: " << (protocolInfo.szProtocol[0] ? protocolInfo.szProtocol : L"Unknown") << std::endl;
     std::wcout << L"Service Flags: 0x" << std::hex << protocolInfo.dwServiceFlags1 << std::endl;
