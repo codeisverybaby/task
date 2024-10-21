@@ -8,6 +8,7 @@
 
 #pragma comment(lib, "ws2_32.lib")
 //Computer\HKEY_LOCAL_MACHINE\SYSTEM\ControlSet001\Services\LanmanWorkstation\NetworkProvider
+//Computer\HKEY_USERS\S-1-5-21-1779779872-2669267369-1413570996-1001\Software\Classes\Local Settings\MuiCache\506\52C64B7E
 void PrintProtocolInfo(WSAPROTOCOL_INFO& protocolInfo) {
     std::wcout << L"Provider Name: " << (protocolInfo.szProtocol[0] ? protocolInfo.szProtocol : L"Unknown") << std::endl;
     std::wcout << L"Service Flags: 0x" << std::hex << protocolInfo.dwServiceFlags1 << std::endl;
