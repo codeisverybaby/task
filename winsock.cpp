@@ -7,6 +7,28 @@
 #include <ws2spi.h> // For WSCGetProviderPath
 
 #pragma comment(lib, "ws2_32.lib")
+
+enum Day {
+    Logon = 1,    // 1
+    Explorer = 2,    // 2
+    InternetExplorer = 3,   // 3
+    ScheduledTasks = 4,
+    Services = 5, // 4
+    Drivers = 6,  // 5
+    Codecs = 7,    // 6
+    BootExecute = 8,   // 7
+    ImageHijacks = 9,    // 1
+    KnownDLLs = 10,    // 2
+    Winlogon = 11,   // 3
+    WinsockPro = 12, // 4
+    PrintMonitors = 13,  // 5
+    LSAProviders = 14,    // 6
+    NetworkProviders = 15,   // 7
+    Office = 16
+};
+
+//Computer\HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tasks\{8A4F4A97-1540-4F87-A97D-C9D5ED92572B}
+
 //Computer\HKEY_LOCAL_MACHINE\SYSTEM\ControlSet001\Services\LanmanWorkstation\NetworkProvider
 //Computer\HKEY_USERS\S-1-5-21-1779779872-2669267369-1413570996-1001\Software\Classes\Local Settings\MuiCache\506\52C64B7E
 void PrintProtocolInfo(WSAPROTOCOL_INFO& protocolInfo) {
