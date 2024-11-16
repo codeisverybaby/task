@@ -61,3 +61,65 @@ class Program
         Console.WriteLine("Decrypted: " + decrypted);
     }
 }
+
+using System;
+using System.Text;
+
+public static class RC4
+{
+    public static string Process(string key, string input)
+    {
+        byte[] keyBytes = Encoding.UTF8.GetBytes(key);
+        byte[] inputBytes = Encoding.UTF8.GetBytes(input);
+        byte[] keySchedule = new byte[256];
+
+        // Initialize the key schedule
+        for (int i = 0; i < 256; i++)
+        {
+            keySchedule[i] = (byte)i;
+        }
+
+        int j = 0;
+        for (int i = 0; i < 256; i++)
+        {
+            j = (j + keySchedule[i] + keyBytes[i % keyBytes.Length]) % 256;
+            byte temp = keySchedule[i];
+            keySchedule[i] = keySchedule[j];
+            keySchedule[j] = temp;
+        }
+
+        byte[] outputBytes = new byte[inputBytes.Length];
+        int i1 = 0, j1 = 0;
+        for (int k = 0; k < inputBytes.Length; k++)
+        {
+            i1 = (i1 + 1) % 256;
+            j1 = (j1 + keySchedule[i1]) % 256;
+            byte temp = keySchedule[i1];
+            keySchedule[i1] = keySchedule[j1];
+            keySchedule[j1] = temp;
+
+            byte ksj = keySchedule[(keySchedule[i1] + keySchedule[j1]) % 256];
+            outputBytes[k] = (byte)(inputBytes[k] ^ ksj);
+        }
+
+        return Encoding.UTF8.GetString(outputBytes);
+    }
+}
+
+// Example usage
+class Program
+{
+    static void Main()
+    {
+        string key = "secretkey";
+        string plaintext = "Hello, World!";
+        
+        // Encrypt the plaintext
+        string encrypted = RC4.Process(key, plaintext);
+        Console.WriteLine("Encrypted: " + encrypted);
+
+        // Decrypt the ciphertext (same function is used for decryption)
+        string decrypted = RC4.Process(key, encrypted);
+        Console.WriteLine("Decrypted: " + decrypted);
+    }
+}
