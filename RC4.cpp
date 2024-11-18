@@ -4,6 +4,10 @@
 
 // RC4 key scheduling and encryption/decryption function
 std::string RC4(const std::string& key, const std::string& input) {
+    if (key.empty()) {
+        throw std::invalid_argument("Key cannot be empty");
+    }
+
     std::vector<unsigned char> keySchedule(256);
     for (int i = 0; i < 256; ++i) {
         keySchedule[i] = static_cast<unsigned char>(i);
@@ -11,7 +15,7 @@ std::string RC4(const std::string& key, const std::string& input) {
 
     int j = 0;
     for (int i = 0; i < 256; ++i) {
-        j = (j + keySchedule[i] + key[i % key.length()]) % 256;
+        j = (j + keySchedule[i] + static_cast<unsigned char>(key[i % key.length()])) % 256;
         std::swap(keySchedule[i], keySchedule[j]);
     }
 
