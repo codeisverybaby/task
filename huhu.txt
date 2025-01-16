@@ -1,0 +1,69 @@
+import javax.tools.*;
+import java.nio.file.*;
+import java.lang.invoke.*;
+import java.io.*;
+
+public class DynamicCompiler {
+    public static void main(String[] args) throws Throwable {
+        String className = "Main";
+        
+        // Step 1: Save the code as a string
+        String code = """
+            public class Main {
+                public static void main(String[] args) {
+                    System.out.println("Hello, Secure World!");
+                }
+            }
+            """;
+        
+        // Step 2: Write the code to a .java file
+        Path sourceFile = Paths.get(className + ".java");
+        Files.writeString(sourceFile, code);
+
+        // Step 3: Compile the Java code dynamically using JavaCompiler API or fallback to external javac
+        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+        if (compiler == null) {
+            // Fallback to calling javac externally if the compiler is not available via ToolProvider
+            System.out.println("JavaCompiler API not available, using external javac.");
+            ProcessBuilder processBuilder = new ProcessBuilder("javac", sourceFile.toString());
+            Process process = processBuilder.start();
+            process.waitFor();
+        } else {
+            int compilationResult = compiler.run(null, null, null, sourceFile.toString());
+
+            if (compilationResult != 0) {
+                System.out.println("Compilation failed!");
+                return;
+            }
+        }
+
+        // Step 4: Load the class and invoke the main method using MethodHandles
+        Class<?> dynamicClass = loadClassFromFile(className);
+
+        // Step 5: Invoke the main method using MethodHandles
+        invokeMainMethod(dynamicClass);
+
+        // Clean up the generated files
+        Files.deleteIfExists(sourceFile);
+        Files.deleteIfExists(Paths.get(className + ".class"));
+    }
+
+    // Load the class using MethodHandles (not ClassLoader or Class.forName)
+    private static Class<?> loadClassFromFile(String className) throws Throwable {
+        // Use MethodHandles to define the class from the compiled bytecode
+        Path classFile = Paths.get(className + ".class");
+        byte[] classData = Files.readAllBytes(classFile);
+
+        MethodHandles.Lookup lookup = MethodHandles.lookup();
+        return lookup.defineClass(classData);
+    }
+
+    // Invoke the main method dynamically using MethodHandles
+    private static void invokeMainMethod(Class<?> dynamicClass) throws Throwable {
+        MethodHandles.Lookup lookup = MethodHandles.lookup();
+        MethodHandle mainMethod = lookup.findStatic(dynamicClass, "main", MethodType.methodType(void.class, String[].class));
+        
+        // Call the main method with an empty argument array
+        mainMethod.invokeExact((Object) new String[]{});
+    }
+}
