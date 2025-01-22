@@ -1,60 +1,22 @@
-import com.sun.jna.*;
-import com.sun.jna.ptr.PointerByReference;
+public class ThreadFunctionExample {
+    public static void main(String[] args) {
+        // Creating a thread to run a void function
+        Thread thread = new Thread(() -> {
+            myFunction(); // Call the void function
+        });
 
-public class LinuxShellcodeJNA {
-    public interface LibC extends Library {
-        LibC INSTANCE = Native.load("c", LibC.class);
-        
-        Pointer mmap(Pointer addr, int length, int prot, int flags, int fd, int offset);
-        int mprotect(Pointer addr, int len, int prot);
-        int munmap(Pointer addr, int length);
-        Pointer memcpy(Pointer dest, byte[] src, int n);
+        thread.start(); // Start the thread
+
+        System.out.println("Main thread continues...");
     }
 
-    public static void main(String[] args) {
-        // Shellcode: Replace this with your actual shellcode bytes
-        // byte[] shellcode = new byte[]{(byte) 0x90, (byte) 0x90, (byte) 0xC3};  // NOP NOP RET
-        
-        byte[] shellcode = new byte[] {
-            (byte) 0x48, (byte) 0x31, (byte) 0xd2, (byte) 0x52, (byte) 0x48, 
-            (byte) 0xb8, (byte) 0x2f, (byte) 0x62, (byte) 0x69, (byte) 0x6e, 
-            (byte) 0x2f, (byte) 0x73, (byte) 0x68, (byte) 0x50, (byte) 0x48, 
-            (byte) 0x89, (byte) 0xe7, (byte) 0x52, (byte) 0x57, (byte) 0x48, 
-            (byte) 0x89, (byte) 0xe6, (byte) 0x48, (byte) 0x31, (byte) 0xc0, 
-            (byte) 0xb0, (byte) 0x3b, (byte) 0x0f, (byte) 0x05, (byte) 0xC3
-        };
-
-
-        // Constants
-        int PROT_READ = 1, PROT_WRITE = 2, PROT_EXEC = 4;
-        int MAP_PRIVATE = 0x02, MAP_ANONYMOUS = 0x20;
-
-        // Allocate executable memory
-        Pointer mem = LibC.INSTANCE.mmap(
-            Pointer.NULL, shellcode.length,
-            PROT_READ | PROT_WRITE | PROT_EXEC,
-            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0
-        );
-
-        if (mem == Pointer.NULL) {
-            System.err.println("mmap failed");
-            return;
-        }
-
-        // Copy shellcode into allocated memory
-        LibC.INSTANCE.memcpy(mem, shellcode, shellcode.length);
-
-        // Execute shellcode
-        Function func = Function.getFunction(mem);
-        func.invoke(Void.class, new Object[]{});
-
-        // Unmap memory
-        // LibC.INSTANCE.munmap(mem, shellcode.length);
+    public static void myFunction() {
+        System.out.println("My function is running in a separate thread!");
         try {
-            Thread.sleep(10000); // Sleep for 10 seconds
+            Thread.sleep(2000); // Simulate some work
         } catch (InterruptedException e) {
-            // Handle the exception
-            System.err.println("Thread was interrupted: " + e.getMessage());
+            e.printStackTrace();
         }
+        System.out.println("My function finished.");
     }
 }
