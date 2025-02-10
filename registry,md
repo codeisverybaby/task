@@ -1,0 +1,12 @@
+# Define registry path and value name
+$regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$valueName = "AutoRunPowerShell"
+$scriptPath = "D:\test\prj-ps1\test.ps1"  # Change this to your actual script path
+
+# Define command to run test.ps1 at startup
+$command = "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`""
+
+# Add the registry key
+New-ItemProperty -Path $regPath -Name $valueName -Value $command -PropertyType String -Force | Out-Null
+
+Write-Host "Registry key added! test.ps1 will run at user login."
