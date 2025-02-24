@@ -1,0 +1,73 @@
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::thread;
+
+const SOCKS5_VERSION: u8 = 0x05;
+const NO_AUTH: u8 = 0x00;
+const USER_PASS_AUTH: u8 = 0x02;
+const CONNECT: u8 = 0x01;
+const IPV4: u8 = 0x01;
+
+const VALID_USERNAME: &str = "user";
+const VALID_PASSWORD: &str = "password";
+
+fn handle_client(mut client: TcpStream) {
+    let mut buf = [0; 256];
+    client.read(&mut buf).unwrap();
+    
+    // Handshake with authentication
+    if buf[2] == USER_PASS_AUTH {
+        client.write_all(&[SOCKS5_VERSION, USER_PASS_AUTH]).unwrap();
+        client.read(&mut buf).unwrap();
+        
+        let username_len = buf[1] as usize;
+        let username = String::from_utf8_lossy(&buf[2..2 + username_len]);
+        let password_len = buf[2 + username_len] as usize;
+        let password = String::from_utf8_lossy(&buf[3 + username_len..3 + username_len + password_len]);
+        
+        if username == VALID_USERNAME && password == VALID_PASSWORD {
+            client.write_all(&[0x01, 0x00]).unwrap();
+        } else {
+            client.write_all(&[0x01, 0x01]).unwrap();
+            return;
+        }
+    } else {
+        client.write_all(&[SOCKS5_VERSION, NO_AUTH]).unwrap();
+    }
+    
+    // Read request
+    client.read(&mut buf).unwrap();
+    if buf[1] != CONNECT {
+        return;
+    }
+    
+    if buf[3] != IPV4 {
+        return;
+    }
+    
+    let addr = format!("{}.{}.{}.{}:{}", buf[4], buf[5], buf[6], buf[7], u16::from_be_bytes([buf[8], buf[9]]));
+    let mut remote = TcpStream::connect(addr).unwrap();
+    
+    // Send success response
+    client.write_all(&[SOCKS5_VERSION, 0x00, 0x00, IPV4, 0, 0, 0, 0, 0, 0]).unwrap();
+    
+    let mut client_clone = client.try_clone().unwrap();
+    let mut remote_clone = remote.try_clone().unwrap();
+    
+    thread::spawn(move || std::io::copy(&mut client_clone, &mut remote_clone).unwrap());
+    std::io::copy(&mut remote, &mut client).unwrap();
+}
+
+fn main() {
+    let listener = TcpListener::bind("0.0.0.0:1080").unwrap();
+    println!("SOCKS5 Proxy Server Running on Port 1080 with Authentication");
+    
+    for stream in listener.incoming() {
+        match stream {
+            Ok(client) => {
+                thread::spawn(move || handle_client(client));
+            }
+            Err(e) => eprintln!("Connection failed: {}", e),
+        }
+    }
+}
