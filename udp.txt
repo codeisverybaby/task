@@ -1,0 +1,72 @@
+use tokio::net::{TcpListener, UdpSocket};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
+use tokio::task;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let udp_socket = UdpSocket::bind("127.0.0.1:9000").await?;
+    let http_listener = TcpListener::bind("127.0.0.1:8080").await?;
+
+    // Shared state: Option<String> để kiểm tra có dữ liệu hay chưa
+    let shared_data = Arc::new(Mutex::new(None));
+
+    // Chạy UDP server
+    let udp_data = shared_data.clone();
+    let udp_task = task::spawn(run_udp_server(udp_socket, udp_data));
+
+    // Chạy HTTP server
+    let http_data = shared_data.clone();
+    let http_task = task::spawn(run_http_server(http_listener, http_data));
+
+    udp_task.await??;
+    http_task.await??;
+
+    Ok(())
+}
+
+// UDP Server: Nhận dữ liệu và lưu vào shared_data
+async fn run_udp_server(socket: UdpSocket, shared_data: Arc<Mutex<Option<String>>>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut buffer = [0; 1024];
+    loop {
+        let (size, addr) = socket.recv_from(&mut buffer).await?;
+        let received_data = String::from_utf8_lossy(&buffer[..size]).to_string();
+
+        println!("🟡 UDP Received from {}: {}", addr, received_data);
+
+        // Lưu dữ liệu vào shared_data
+        let mut data = shared_data.lock().await;
+        *data = Some(received_data);
+    }
+}
+
+// HTTP Server: Chỉ phản hồi nếu đã có dữ liệu UDP
+async fn run_http_server(listener: TcpListener, shared_data: Arc<Mutex<Option<String>>>) -> Result<(), Box<dyn std::error::Error>> {
+    loop {
+        let (mut socket, addr) = listener.accept().await?;
+        let data = shared_data.clone();
+
+        tokio::spawn(async move {
+            let mut buffer = [0; 1024];
+            let _ = socket.read(&mut buffer).await;
+
+            // Kiểm tra nếu có dữ liệu từ UDP
+            let response = {
+                let data = data.lock().await;
+                if let Some(ref message) = *data {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                        message.len(),
+                        message
+                    )
+                } else {
+                    String::from("HTTP/1.1 204 No Content\r\n\r\n")
+                }
+            };
+
+            let _ = socket.write_all(response.as_bytes()).await;
+            println!("🔵 HTTP Response to {}: {}", addr, response);
+        });
+    }
+}
