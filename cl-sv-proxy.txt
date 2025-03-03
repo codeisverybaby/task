@@ -1,0 +1,133 @@
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use rand::Rng;
+use std::net::SocketAddr;
+
+const MAX_UDP_SIZE: usize = 1400; // Giới hạn UDP payload
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:7070").await?;
+    println!("Proxy Client listening on 127.0.0.1:7070 (TCP)");
+
+    loop {
+        let (mut client_stream, _) = listener.accept().await?;
+        tokio::spawn(async move {
+            if let Err(e) = handle_client(&mut client_stream).await {
+                eprintln!("Error handling client: {}", e);
+            }
+        });
+    }
+}
+
+async fn handle_client(client_stream: &mut TcpStream) -> std::io::Result<()> {
+    // Đọc toàn bộ dữ liệu từ Client
+    let mut buffer = Vec::new();
+    client_stream.read_to_end(&mut buffer).await?;
+
+    // **Tạo một UDP socket với port ngẫu nhiên**
+    let local_socket = UdpSocket::bind("127.0.0.1:0").await?;
+    let local_port = local_socket.local_addr()?.port();
+    let proxy_server_addr: SocketAddr = "127.0.0.1:9090".parse().unwrap();
+
+    println!("Proxy Client using UDP port: {}", local_port);
+
+    // **Gửi gói tin START**
+    let start_msg = format!("START:{}", local_port);
+    local_socket.send_to(start_msg.as_bytes(), proxy_server_addr).await?;
+
+    // **Chia nhỏ dữ liệu & gửi theo UDP**
+    for (i, chunk) in buffer.chunks(MAX_UDP_SIZE).enumerate() {
+        let index = (i as u16).to_be_bytes(); // Đánh số thứ tự (Big Endian)
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&index);
+        packet.extend_from_slice(chunk);
+        local_socket.send_to(&packet, proxy_server_addr).await?;
+    }
+
+    // **Gửi gói tin END**
+    local_socket.send_to(b"END", proxy_server_addr).await?;
+
+    println!("Sent full data to Proxy Server via UDP port {}", local_port);
+
+    // **Chờ phản hồi từ Proxy Server**
+    let mut response_buffer = vec![0; 1024];
+    let (n, _) = local_socket.recv_from(&mut response_buffer).await?;
+    client_stream.write_all(&response_buffer[..n]).await?;
+
+    Ok(())
+}
+
+use tokio::net::{UdpSocket, TcpStream};
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
+use tokio::sync::RwLock;
+use once_cell::sync::Lazy;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+
+const MAX_UDP_SIZE: usize = 1400;
+
+// Biến toàn cục: lưu trữ dữ liệu theo từng port, đảm bảo đúng thứ tự
+static DATA_STORE: Lazy<Arc<RwLock<HashMap<u16, BTreeMap<u16, Vec<u8>>>>>> =
+    Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let udp_socket = UdpSocket::bind("127.0.0.1:9090").await?;
+    println!("Proxy Server listening on 127.0.0.1:9090 (UDP)");
+
+    let mut buffer = [0; MAX_UDP_SIZE + 3]; // 2 bytes index + data
+
+    loop {
+        let (n, client_addr) = udp_socket.recv_from(&mut buffer).await?;
+        let received = &buffer[..n];
+
+        // Nếu là gói tin START
+        if received.starts_with(b"START:") {
+            if let Ok(port_str) = std::str::from_utf8(&received[6..]) {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    let mut store = DATA_STORE.write().await;
+                    store.insert(port, BTreeMap::new());
+                    println!("Started receiving data on port {}", port);
+                }
+            }
+            continue;
+        }
+
+        // Nếu là gói tin END
+        if received == b"END" {
+            let port = client_addr.port();
+            let mut store = DATA_STORE.write().await;
+            if let Some(data_map) = store.remove(&port) {
+                let mut full_data = Vec::new();
+                for (_, chunk) in data_map {
+                    full_data.extend_from_slice(&chunk);
+                }
+                println!("Received full data on port {}", port);
+
+                // Gửi đến Server qua TCP
+                if let Ok(mut tcp_stream) = TcpStream::connect("127.0.0.1:8080").await {
+                    tcp_stream.write_all(&full_data).await.unwrap();
+
+                    // Nhận phản hồi từ Server
+                    let mut response = vec![0; 1024];
+                    let n = tcp_stream.read(&mut response).await.unwrap();
+                    udp_socket.send_to(&response[..n], client_addr).await?;
+                }
+            }
+            continue;
+        }
+
+        // Nếu là gói tin dữ liệu
+        if received.len() > 2 {
+            let port = client_addr.port();
+            let index = u16::from_be_bytes([received[0], received[1]]);
+            let data_chunk = &received[2..];
+
+            let mut store = DATA_STORE.write().await;
+            if let Some(storage) = store.get_mut(&port) {
+                storage.insert(index, data_chunk.to_vec()); // Lưu theo thứ tự index
+            }
+        }
+    }
+}
