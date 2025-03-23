@@ -1,0 +1,69 @@
+use tokio::net::UdpSocket;
+use tokio::task;
+use socket2::{Socket, Domain, Type};
+use std::sync::Arc;
+use tokio::time::{sleep, Duration};
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    // Tạo socket UDP
+    let socket = UdpSocket::bind("0.0.0.0:8080").await?;
+
+    // Tăng buffer UDP để nhận nhiều packet hơn
+    let raw_socket = Socket::from(socket);
+    raw_socket.set_recv_buffer_size(4 * 1024 * 1024)?; // 4MB Buffer
+
+    // Chia sẻ socket giữa nhiều luồng
+    let socket = Arc::new(UdpSocket::from_std(raw_socket.into())?);
+
+    println!("🚀 UDP Server running on 0.0.0.0:8080...");
+
+    // Số lượng worker nhận dữ liệu
+    let workers = 4;
+    let mut handles = vec![];
+
+    // Worker nhận dữ liệu
+    for _ in 0..workers {
+        let socket = Arc::clone(&socket);
+        let handle = task::spawn(async move {
+            let mut buf = [0u8; 65536];
+
+            loop {
+                match socket.recv_from(&mut buf).await {
+                    Ok((len, addr)) => {
+                        println!("📩 Received {} bytes from {}", len, addr);
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Error receiving data: {}", e);
+                    }
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    // 🔥 Thêm một worker để gửi dữ liệu định kỳ
+    let socket_send = Arc::clone(&socket);
+    let send_handle = task::spawn(async move {
+        let target_addr = "127.0.0.1:9090"; // Địa chỉ client nhận dữ liệu
+        let data = b"Hello from Server!";
+        
+        loop {
+            match socket_send.send_to(data, target_addr).await {
+                Ok(len) => println!("📤 Sent {} bytes to {}", len, target_addr),
+                Err(e) => eprintln!("❌ Error sending data: {}", e),
+            }
+            sleep(Duration::from_secs(1)).await; // Gửi mỗi giây một lần
+        }
+    });
+
+    handles.push(send_handle);
+
+    // Chờ tất cả worker chạy
+    for handle in handles {
+        handle.await?;
+    }
+
+    Ok(())
+}
