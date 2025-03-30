@@ -1,0 +1,117 @@
+use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+use std::io::Write;
+use lazy_static::lazy_static;
+
+struct DataStore {
+    buffer: Vec<u8>,
+    last_update: Instant,
+}
+
+lazy_static! {
+    static ref DATA_STORE: Arc<Mutex<DataStore>> = Arc::new(Mutex::new(DataStore {
+        buffer: Vec::new(),
+        last_update: Instant::now(),
+    }));
+}
+
+fn main() {
+    let udp_socket = UdpSocket::bind("0.0.0.0:8080").expect("Failed to bind UDP socket");
+    let tcp_listener = TcpListener::bind("0.0.0.0:8081").expect("Failed to bind TCP listener");
+    
+    thread::spawn(move || {
+        let mut buf = [0u8; 1024];
+        loop {
+            match udp_socket.recv_from(&mut buf) {
+                Ok((size, _)) => {
+                    let mut store = DATA_STORE.lock().unwrap();
+                    store.buffer.extend_from_slice(&buf[..size]);
+                    store.last_update = Instant::now();
+                }
+                Err(e) => eprintln!("UDP receive error: {}", e),
+            }
+        }
+    });
+    
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_secs(5));
+            let mut store = DATA_STORE.lock().unwrap();
+            if !store.buffer.is_empty()
+                && (store.buffer.len() >= 4000 || store.last_update.elapsed() >= Duration::from_secs(5))
+            {
+                let data = store.buffer.clone();
+                store.buffer.clear();
+                drop(store);
+                if let Ok((mut tcp_stream, _)) = tcp_listener.accept() {
+                    let _ = tcp_stream.write_all(&data);
+                }
+            }
+        }
+    });
+    
+    println!("UDP Server running on 0.0.0.0:8080, TCP Server on 0.0.0.0:8081");
+    loop {
+        thread::sleep(Duration::from_secs(60));
+    }
+}
+
+use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+use crossbeam::queue::SegQueue;
+use std::io::Write;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref DATA_QUEUE: Arc<SegQueue<Vec<u8>>> = Arc::new(SegQueue::new());
+    static ref LAST_UPDATE: Arc<RwLock<Instant>> = Arc::new(RwLock::new(Instant::now()));
+    static ref DATA_SIZE: AtomicUsize = AtomicUsize::new(0);
+}
+
+fn main() {
+    let udp_socket = UdpSocket::bind("0.0.0.0:8080").expect("Failed to bind UDP socket");
+    udp_socket.set_nonblocking(true).expect("Failed to set non-blocking");
+    let tcp_listener = TcpListener::bind("0.0.0.0:8081").expect("Failed to bind TCP listener");
+
+    thread::spawn(move || {
+        let mut buf = [0u8; 1024];
+        loop {
+            match udp_socket.recv_from(&mut buf) {
+                Ok((size, _)) => {
+                    DATA_QUEUE.push(buf[..size].to_vec());
+                    DATA_SIZE.fetch_add(size, Ordering::Relaxed);
+                    *LAST_UPDATE.write().unwrap() = Instant::now();
+                }
+                Err(_) => {}
+            }
+        }
+    });
+
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_secs(5));
+            if DATA_SIZE.load(Ordering::Relaxed) >= 4000 || LAST_UPDATE.read().unwrap().elapsed() >= Duration::from_secs(5) {
+                let mut collected_data = Vec::new();
+                while let Some(data) = DATA_QUEUE.pop() {
+                    collected_data.extend(data);
+                }
+                DATA_SIZE.store(0, Ordering::Relaxed);
+                *LAST_UPDATE.write().unwrap() = Instant::now();
+                if let Ok((mut tcp_stream, _)) = tcp_listener.accept() {
+                    let _ = tcp_stream.write_all(&collected_data);
+                }
+            }
+        }
+    });
+
+    println!("Optimized UDP Server on 0.0.0.0:8080, TCP Server on 0.0.0.0:8081");
+    loop {
+        thread::sleep(Duration::from_secs(60));
+    }
+}
+
