@@ -1,0 +1,114 @@
+use std::{
+    net::{TcpListener, TcpStream, UdpSocket},
+    sync::RwLock,
+    thread,
+    time::{Duration, Instant},
+    io::Write,
+};
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref STORE: RwLock<Vec<u8>> = RwLock::new(Vec::with_capacity(8192)); // Dự trữ 8KB để giảm cấp phát
+    static ref LAST_FLUSH: RwLock<Instant> = RwLock::new(Instant::now());
+}
+
+fn main() {
+    println!("Server started...");
+    
+    // UDP Server Thread
+    thread::spawn(move || {
+        let socket = UdpSocket::bind("0.0.0.0:8080").expect("Failed to bind UDP socket");
+        let mut buf = [0u8; 2048]; // Dùng buffer lớn hơn để giảm số lần nhận
+        println!("UDP server listening on port 8080");
+        loop {
+            if let Ok((size, src)) = socket.recv_from(&mut buf) {
+                let mut store = STORE.write().unwrap();
+                store.extend_from_slice(&buf[..size]);
+                println!("Received {} bytes from {}. Store size: {}", size, src, store.len());
+            }
+        }
+    });
+
+    // TCP Server Thread
+    thread::spawn(move || {
+        let listener = TcpListener::bind("0.0.0.0:9090").expect("Failed to bind TCP socket");
+        println!("TCP server listening on port 9090");
+        for stream in listener.incoming() {
+            if let Ok(stream) = stream {
+                println!("New TCP connection established");
+                thread::spawn(move || check_and_send(stream));
+            }
+        }
+    });
+
+    // Main loop to prevent exit
+    loop {
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn check_and_send(mut stream: TcpStream) {
+    loop {
+        thread::sleep(Duration::from_millis(500)); // Giảm khoảng cách kiểm tra để phản hồi nhanh hơn
+        let elapsed = LAST_FLUSH.read().unwrap().elapsed();
+        let store_size;
+        
+        {
+            let store_lock = STORE.read().unwrap();
+            store_size = store_lock.len();
+            println!("Checking conditions: store_size = {}, elapsed = {:.3} seconds", store_size, elapsed.as_secs_f64());
+            if store_size <= 1000 && elapsed < Duration::from_secs(5) {
+                continue;
+            }
+        }
+        
+        let mut store_lock = STORE.write().unwrap();
+        println!("Sending {} bytes via TCP", store_lock.len());
+        if let Err(_) = stream.write_all(&store_lock) {
+            eprintln!("Failed to send data over TCP");
+        } else {
+            println!("Successfully sent {} bytes via TCP", store_lock.len());
+        }
+        store_lock.clear();
+        *LAST_FLUSH.write().unwrap() = Instant::now();
+    }
+}
+
+use std::{net::{TcpStream, UdpSocket}, io::Read, thread, time::Duration};
+
+fn main() {
+    // UDP Client Thread
+    thread::spawn(move || {
+        let socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind UDP socket");
+        socket.connect("127.0.0.1:8080").expect("Failed to connect UDP");
+        println!("UDP Client started");
+
+        let mut counter = 0;
+        loop {
+            let message = format!("Hello {}", counter);
+            socket.send(message.as_bytes()).expect("Failed to send UDP message");
+            println!("Sent: {}", message);
+            counter += 1;
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
+
+    // TCP Client
+    let mut stream = TcpStream::connect("127.0.0.1:9090").expect("Failed to connect to TCP server");
+    println!("TCP Client connected");
+    let mut buffer = vec![0; 8192];
+    
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(size) if size > 0 => {
+                println!("Received {} bytes via TCP: {:?}", size, &buffer[..size]);
+            }
+            Ok(_) => {},
+            Err(e) => {
+                eprintln!("TCP read error: {}", e);
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+}
