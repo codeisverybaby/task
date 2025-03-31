@@ -1,0 +1,75 @@
+use std::{
+    net::{TcpListener, TcpStream, UdpSocket},
+    sync::Mutex,
+    thread,
+    time::{Duration, Instant},
+    io::Write,
+};
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref STORE: RwLock<Vec<u8>> = RwLock::new(Vec::with_capacity(16384)); // Dự trữ 16KB để giảm cấp phát
+    static ref LAST_FLUSH: Mutex<Instant> = Mutex::new(Instant::now());
+}
+
+fn main() {
+    println!("Server started...");
+    
+    // UDP Server Thread
+    thread::spawn(move || {
+        let socket = UdpSocket::bind("0.0.0.0:8080").expect("Failed to bind UDP socket");
+        let mut buf = [0u8; 2048]; // Dùng buffer lớn hơn để giảm số lần nhận
+        println!("UDP server listening on port 8080");
+        loop {
+            if let Ok((size, src)) = socket.recv_from(&mut buf) {
+                let mut store = STORE.write().unwrap();
+                store.extend_from_slice(&buf[..size]);
+                println!("Received {} bytes from {}. Store size: {}", size, src, store.len());
+            }
+        }
+    });
+
+    // TCP Server Thread
+    thread::spawn(move || {
+        let listener = TcpListener::bind("0.0.0.0:9090").expect("Failed to bind TCP socket");
+        println!("TCP server listening on port 9090");
+        for stream in listener.incoming() {
+            if let Ok(stream) = stream {
+                println!("New TCP connection established");
+                thread::spawn(move || check_and_send(stream));
+            }
+        }
+    });
+
+    // Main loop to prevent exit
+    loop {
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn check_and_send(mut stream: TcpStream) {
+    loop {
+        thread::sleep(Duration::from_millis(500)); // Giảm khoảng cách kiểm tra để phản hồi nhanh hơn
+        let elapsed = LAST_FLUSH.lock().unwrap().elapsed();
+        let store_size: usize;
+
+        {
+            let store_lock = STORE.read().unwrap();
+            store_size = store_lock.len();
+            println!("Checking conditions: store_size = {}, elapsed = {:.3} seconds", store_size, elapsed.as_secs_f64());
+            if store_size <= 4000 && elapsed < Duration::from_secs(5) {
+                continue;
+            }
+        }
+
+        let mut store_lock = STORE.write().unwrap();
+        println!("Sending {} bytes via TCP", store_lock.len());
+        if let Err(_) = stream.write_all(&store_lock) {
+            eprintln!("Failed to send data over TCP");
+        } else {
+            println!("Successfully sent {} bytes via TCP", store_lock.len());
+        }
+        store_lock.clear();
+        *LAST_FLUSH.lock().unwrap() = Instant::now();
+    }
+}
