@@ -1,0 +1,33 @@
+Kỹ thuật | Dễ dùng | Stealth | Khó detect | Độ phức tạp
+CreateRemoteThread | ⭐⭐⭐⭐⭐ | ⭐ | ⭐ | ⭐
+NtCreateThreadEx | ⭐⭐⭐⭐ | ⭐⭐ | ⭐⭐ | ⭐⭐
+QueueUserAPC | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐ | ⭐⭐
+SetWindowsHookEx | ⭐⭐⭐ | ⭐⭐ | ⭐ | ⭐⭐
+Process Hollowing | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐ | ⭐⭐
+Reflective DLL Injection | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐
+Heaven's Gate | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐
+Section Mapping | ⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐
+Thread Hijacking | ⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐
+Process Doppelgänging | ⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐
+
+Kỹ thuật | Stealth | Độ phức tạp | AV/EDR Detection
+Direct Syscalls | ⭐⭐⭐⭐⭐ | ⭐⭐ | Rất khó
+Indirect Syscalls | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | Rất khó
+Manual Mapping | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Khó
+Callback Injection | ⭐⭐⭐⭐ | ⭐⭐⭐ | Khó
+Process Herpaderping | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Rất khó
+Module Stomping | ⭐⭐⭐⭐ | ⭐⭐⭐ | Khó
+Transacted Hollowing | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Rất khó
+Threadless / FLS Injection | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Rất khó
+IFEO Injection | ⭐⭐⭐ | ⭐⭐ | Trung bình
+Sleep Obfuscation / Masking | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Rất khó
+
+Kỹ thuật | Ưu điểm | Nhược điểm | Stealth | Độ phức tạp | Khả năng thực tế
+QueueUserAPC (APC Queueing) | Không cần tạo thread mới, shellcode thực thi tự nhiên | Cần thread Alertable phù hợp, khó kiểm soát | ⭐⭐⭐⭐ | ⭐⭐ | Cao
+Section Mapping Injection | Không dùng WriteProcessMemory, memory share stealth | Phức tạp khi mapping permission, offset | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Rất cao
+ETW Patch/Bypass | Bypass log API call chain, tắt ETW telemetry | Nếu patch lỗi hoặc thiếu — dễ bị anomaly detect | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | Rất cao
+Process Ghosting | Không để lại file trên đĩa, khó trace source | Phức tạp, mới, một số AV đã có rule signature | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Cao
+Early Bird APC Injection | Thực thi trước cả EntryPoint, bypass EDR | Phải quản lý process state rất chính xác, dễ crash | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Cao
+Heaven's Gate Execution | Thực thi shellcode 64-bit trong process WOW64, direct syscall | Chỉ dùng được trong process WOW64, phức tạp về call convention | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Trung bình
+Indirect Syscall từ Stub Module | Bypass hook bằng syscall stub trong module “an toàn” | Phải tìm đúng module, offset chính xác | ⭐⭐⭐⭐ | ⭐⭐⭐ | Rất cao
+Process Doppelgänging (nâng cao) | Không file thật, cực stealth, chỉnh PE header + PEB | Phức tạp, dễ lỗi, cần NTFS transaction | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | Cao
