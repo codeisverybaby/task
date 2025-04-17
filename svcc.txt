@@ -1,0 +1,177 @@
+using System;
+using System.Collections.Concurrent;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading.Tasks;
+
+class OptimizedServer
+{
+    static ConcurrentDictionary<string, ConcurrentQueue<string>> clientData = new ConcurrentDictionary<string, ConcurrentQueue<string>>();
+    static ConcurrentDictionary<string, UdpClient> udpSockets = new ConcurrentDictionary<string, UdpClient>();
+
+    public static async Task StartHttpServer(string[] prefixes)
+    {
+        HttpListener listener = new HttpListener();
+        foreach (string prefix in prefixes)
+            listener.Prefixes.Add(prefix);
+
+        listener.Start();
+        Console.WriteLine("HTTP Server started...");
+
+        while (true)
+        {
+            var context = await listener.GetContextAsync();
+            _ = HandleHttpRequest(context); // Không cần Task.Run, native async
+        }
+    }
+
+    static async Task HandleHttpRequest(HttpListenerContext context)
+    {
+        if (context.Request.HttpMethod != "POST")
+        {
+            context.Response.StatusCode = 405;
+            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("Method Not Allowed"));
+            context.Response.Close();
+            return;
+        }
+
+        string clientId;
+        using (StreamReader reader = new StreamReader(context.Request.InputStream, context.Request.ContentEncoding))
+        {
+            clientId = await reader.ReadToEndAsync();
+        }
+
+        if (string.IsNullOrWhiteSpace(clientId))
+        {
+            context.Response.StatusCode = 400;
+            await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes("Missing clientId"));
+            context.Response.Close();
+            return;
+        }
+
+        // Lấy hoặc tạo UDP socket cho client
+        var udpClient = udpSockets.GetOrAdd(clientId, id =>
+        {
+            var client = new UdpClient(0); // Random port
+            clientData[id] = new ConcurrentQueue<string>();
+            _ = ListenUdpResponseAsync(id, client); // async listener riêng từng client
+            return client;
+        });
+
+        await SendUdpMessageAsync(udpClient, $"Ping from {clientId}");
+
+        // Kiểm tra data có sẵn
+        if (clientData[clientId].TryDequeue(out string responseData))
+        {
+            await WriteResponseAsync(context, responseData);
+        }
+        else
+        {
+            await WriteResponseAsync(context, "OK");
+        }
+    }
+
+    static async Task SendUdpMessageAsync(UdpClient udpClient, string message)
+    {
+        string serverAddress = "127.0.0.1";
+        int serverPort = 9000;
+        byte[] data = Encoding.UTF8.GetBytes(message);
+        await udpClient.SendAsync(data, data.Length, serverAddress, serverPort);
+    }
+
+    static async Task ListenUdpResponseAsync(string clientId, UdpClient udpClient)
+    {
+        IPEndPoint remoteEP = new IPEndPoint(IPAddress.Any, 0);
+        try
+        {
+            while (true)
+            {
+                var result = await udpClient.ReceiveAsync();
+                string message = Encoding.UTF8.GetString(result.Buffer);
+                clientData[clientId].Enqueue(message);
+                //Console.WriteLine($"[{clientId}] Received: {message}");
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            // Socket closed — ignore
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"UDP Error for {clientId}: {ex.Message}");
+        }
+    }
+
+    static async Task WriteResponseAsync(HttpListenerContext context, string responseText)
+    {
+        byte[] buffer = Encoding.UTF8.GetBytes(responseText);
+        context.Response.ContentLength64 = buffer.Length;
+        context.Response.ContentType = "text/plain";
+        await context.Response.OutputStream.WriteAsync(buffer, 0, buffer.Length);
+        context.Response.Close();
+    }
+
+    static void Main(string[] args)
+    {
+        string[] prefixes = { "http://localhost:8080/" };
+        Task.WaitAll(StartHttpServer(prefixes));
+    }
+}
+
+
+//using System;
+//using System.Net;
+//using System.Net.Sockets;
+//using System.Text;
+
+//class UdpServer
+//{
+//    static void Main()
+//    {
+//        UdpClient server = new UdpClient(9000);
+//        Console.WriteLine("UDP Server listening...");
+
+//        IPEndPoint remoteEP = new IPEndPoint(IPAddress.Any, 0);
+
+//        while (true)
+//        {
+//            var data = server.Receive(ref remoteEP);
+//            string msg = Encoding.UTF8.GetString(data);
+//            //Console.WriteLine($"Received from {remoteEP}: {msg}");
+
+//            string response = $"Reply: {msg}";
+//            byte[] respData = Encoding.UTF8.GetBytes(response);
+//            server.Send(respData, respData.Length, remoteEP);
+//        }
+//    }
+//}
+
+//using System;
+//using System.Net.Http;
+//using System.Text;
+//using System.Threading.Tasks;
+
+//class Client
+//{
+//    static async Task Main()
+//    {
+//        HttpClient client = new HttpClient();
+//        Random rand = new Random();
+
+//        string clientId = $"client_{rand.Next(1, 1000):D4}"; // Random 1 lần khi khởi động
+//        Console.WriteLine($"Client started with ID: {clientId}");
+
+//        while (true)
+//        {
+//            var content = new StringContent(clientId, Encoding.UTF8, "text/plain");
+//            var response = await client.PostAsync("http://localhost:8080/", content);
+//            string responseText = await response.Content.ReadAsStringAsync();
+
+//            Console.WriteLine($"Sent {clientId}, Response: {responseText}");
+
+//            await Task.Delay(10); // chờ 1 giây
+//        }
+//    }
+//}
