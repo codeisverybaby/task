@@ -1,0 +1,222 @@
+Program.cs
+csharp
+Sao chép
+Chỉnh sửa
+using System;
+
+class Program
+{
+    static async Task Main(string[] args)
+    {
+        if (args.Length == 0)
+        {
+            Console.WriteLine("Usage: ServerDualMode [http|udp]");
+            return;
+        }
+
+        string mode = args[0].ToLower();
+
+        if (mode == "http")
+        {
+            await HttpModeServer.Start();
+        }
+        else if (mode == "udp")
+        {
+            await UdpModeServer.Start();
+        }
+        else
+        {
+            Console.WriteLine("Invalid mode. Use 'http' or 'udp'");
+        }
+    }
+}
+📄 ClientManager.cs
+csharp
+Sao chép
+Chỉnh sửa
+using System.Buffers;
+using System.Collections.Concurrent;
+using System.Net.Sockets;
+
+public static class ClientManager
+{
+    public static readonly ConcurrentDictionary<string, ConcurrentQueue<byte[]>> ClientData = new();
+    public static readonly ConcurrentDictionary<string, UdpClient> ClientSockets = new();
+    public static readonly ArrayPool<byte> BufferPool = ArrayPool<byte>.Shared;
+
+    public static void AddData(string clientId, byte[] data)
+    {
+        ClientData.GetOrAdd(clientId, _ => new ConcurrentQueue<byte[]>()).Enqueue(data);
+    }
+
+    public static bool TryGetData(string clientId, out byte[] data)
+    {
+        data = null;
+        return ClientData.TryGetValue(clientId, out var queue) && queue.TryDequeue(out data);
+    }
+}
+📄 HttpModeServer.cs
+csharp
+Sao chép
+Chỉnh sửa
+using System;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading.Tasks;
+
+public static class HttpModeServer
+{
+    private const int UdpBackendPort = 6000;
+    private const int BufferSize = 1024;
+
+    public static async Task Start()
+    {
+        var listener = new HttpListener();
+        listener.Prefixes.Add("http://*:8080/");
+        listener.Start();
+        Console.WriteLine("HTTP Server listening on port 8080");
+
+        while (true)
+        {
+            var context = await listener.GetContextAsync();
+            if (context.Request.HttpMethod != "POST")
+            {
+                context.Response.StatusCode = 405;
+                context.Response.Close();
+                continue;
+            }
+
+            var buffer = ClientManager.BufferPool.Rent(BufferSize);
+            try
+            {
+                int bytesRead = context.Request.InputStream.Read(buffer, 0, BufferSize);
+                var clientId = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
+
+                if (!ClientManager.ClientSockets.ContainsKey(clientId))
+                {
+                    var udpClient = new UdpClient();
+                    udpClient.Connect("127.0.0.1", UdpBackendPort);
+                    ClientManager.ClientSockets[clientId] = udpClient;
+
+                    _ = Task.Run(() => ListenUdpForClient(clientId, udpClient));
+                }
+
+                var message = Encoding.UTF8.GetBytes($"Hello from {clientId}");
+                var clientSocket = ClientManager.ClientSockets[clientId];
+                await clientSocket.SendAsync(message, message.Length);
+
+                if (ClientManager.TryGetData(clientId, out var data))
+                {
+                    context.Response.OutputStream.Write(data, 0, data.Length);
+                }
+                else
+                {
+                    var okResponse = Encoding.UTF8.GetBytes("OK");
+                    context.Response.OutputStream.Write(okResponse, 0, okResponse.Length);
+                }
+
+                context.Response.Close();
+            }
+            finally
+            {
+                ClientManager.BufferPool.Return(buffer);
+            }
+        }
+    }
+
+    private static async Task ListenUdpForClient(string clientId, UdpClient udpClient)
+    {
+        while (true)
+        {
+            var result = await udpClient.ReceiveAsync();
+            var dataCopy = new byte[result.Buffer.Length];
+            Buffer.BlockCopy(result.Buffer, 0, dataCopy, 0, dataCopy.Length);
+
+            ClientManager.AddData(clientId, dataCopy);
+        }
+    }
+}
+📄 UdpModeServer.cs
+csharp
+Sao chép
+Chỉnh sửa
+using System;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading.Tasks;
+
+public static class UdpModeServer
+{
+    private const int UdpBackendPort = 6000;
+    private const int ServerPort = 8080;
+    private const int BufferSize = 1024;
+
+    public static async Task Start()
+    {
+        var udpServer = new UdpClient(ServerPort);
+        Console.WriteLine($"UDP Server listening on port {ServerPort}");
+
+        while (true)
+        {
+            var result = await udpServer.ReceiveAsync();
+            var buffer = ClientManager.BufferPool.Rent(BufferSize);
+
+            try
+            {
+                Buffer.BlockCopy(result.Buffer, 0, buffer, 0, result.Buffer.Length);
+                var clientId = Encoding.UTF8.GetString(buffer, 0, result.Buffer.Length).Trim();
+
+                if (!ClientManager.ClientSockets.ContainsKey(clientId))
+                {
+                    var udpClient = new UdpClient();
+                    udpClient.Connect("127.0.0.1", UdpBackendPort);
+                    ClientManager.ClientSockets[clientId] = udpClient;
+
+                    _ = Task.Run(() => ListenUdpForClient(clientId, udpClient));
+                }
+
+                var message = Encoding.UTF8.GetBytes($"Hello from {clientId}");
+                var clientSocket = ClientManager.ClientSockets[clientId];
+                await clientSocket.SendAsync(message, message.Length);
+
+                byte[] responseData;
+                if (ClientManager.TryGetData(clientId, out responseData))
+                {
+                    await udpServer.SendAsync(responseData, responseData.Length, result.RemoteEndPoint);
+                }
+                else
+                {
+                    var okResponse = Encoding.UTF8.GetBytes("OK");
+                    await udpServer.SendAsync(okResponse, okResponse.Length, result.RemoteEndPoint);
+                }
+            }
+            finally
+            {
+                ClientManager.BufferPool.Return(buffer);
+            }
+        }
+    }
+
+    private static async Task ListenUdpForClient(string clientId, UdpClient udpClient)
+    {
+        while (true)
+        {
+            var result = await udpClient.ReceiveAsync();
+            var dataCopy = new byte[result.Buffer.Length];
+            Buffer.BlockCopy(result.Buffer, 0, dataCopy, 0, dataCopy.Length);
+
+            ClientManager.AddData(clientId, dataCopy);
+        }
+    }
+}
+✅ Giải thích lại chuẩn flow
+
+HTTP Mode	UDP Mode
+Client gửi POST với clientId	Client gửi UDP message chứa clientId
+Server tạo UDP socket riêng cho client nếu chưa có	Server tạo UDP socket riêng cho client nếu chưa có
+Gửi message đến UDP backend server	Gửi message đến UDP backend server
+UDP socket listen, nhận về, lưu ClientData[clientId]	UDP socket listen, nhận về, lưu ClientData[clientId]
+Nếu có data thì response lại HTTP	Nếu có data thì response lại UDP
+Nếu không thì trả OK	Nếu không thì trả OK
