@@ -1,0 +1,28 @@
+private static async Task ListenUdpForClient(string clientId, UdpClient udpClient)
+{
+    udpClient.Client.ReceiveTimeout = 3000; // 3 giây timeout
+
+    while (true)
+    {
+        try
+        {
+            var result = await udpClient.ReceiveAsync();
+            var dataCopy = new byte[result.Buffer.Length];
+            Buffer.BlockCopy(result.Buffer, 0, dataCopy, 0, dataCopy.Length);
+
+            ClientManager.AddData(clientId, dataCopy);
+        }
+        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.TimedOut)
+        {
+            Console.WriteLine($"[{clientId}] UDP backend timeout — reconnecting...");
+
+            udpClient.Dispose();
+            var newUdpClient = new UdpClient();
+            newUdpClient.Connect("127.0.0.1", 6000);
+            ClientManager.ClientSockets[clientId] = newUdpClient;
+
+            udpClient = newUdpClient;
+            udpClient.Client.ReceiveTimeout = 3000;
+        }
+    }
+}
