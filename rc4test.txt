@@ -1,0 +1,82 @@
+using System;
+
+public static class RC4Drop1024
+{
+    public static byte[] Encrypt(byte[] data, byte[] key)
+    {
+        var s = new byte[256];
+        for (int i = 0; i < 256; i++) s[i] = (byte)i;
+
+        int j = 0;
+        for (int i = 0; i < 256; i++)
+        {
+            j = (j + s[i] + key[i % key.Length]) & 0xFF;
+            (s[i], s[j]) = (s[j], s[i]);
+        }
+
+        int iIndex = 0, jIndex = 0;
+
+        // Drop 1024 bytes
+        for (int k = 0; k < 1024; k++)
+        {
+            iIndex = (iIndex + 1) & 0xFF;
+            jIndex = (jIndex + s[iIndex]) & 0xFF;
+            (s[iIndex], s[jIndex]) = (s[jIndex], s[iIndex]);
+        }
+
+        byte[] output = new byte[data.Length];
+        for (int k = 0; k < data.Length; k++)
+        {
+            iIndex = (iIndex + 1) & 0xFF;
+            jIndex = (jIndex + s[iIndex]) & 0xFF;
+            (s[iIndex], s[jIndex]) = (s[jIndex], s[iIndex]);
+            byte kByte = s[(s[iIndex] + s[jIndex]) & 0xFF];
+            output[k] = (byte)(data[k] ^ kByte);
+        }
+
+        return output;
+    }
+}
+
+
+#include <iostream>
+#include <vector>
+#include <string>
+
+std::string RC4Drop1024(const std::string& data, const std::string& key)
+{
+    std::vector<unsigned char> s(256);
+    for (int i = 0; i < 256; i++) s[i] = i;
+
+    int j = 0;
+    for (int i = 0; i < 256; i++)
+    {
+        j = (j + s[i] + (unsigned char)key[i % key.size()]) & 0xFF;
+        std::swap(s[i], s[j]);
+    }
+
+    int iIndex = 0, jIndex = 0;
+
+    // Drop 1024 bytes
+    for (int k = 0; k < 1024; k++)
+    {
+        iIndex = (iIndex + 1) & 0xFF;
+        jIndex = (jIndex + s[iIndex]) & 0xFF;
+        std::swap(s[iIndex], s[jIndex]);
+    }
+
+    std::string output;
+    output.resize(data.size());
+
+    for (size_t k = 0; k < data.size(); k++)
+    {
+        iIndex = (iIndex + 1) & 0xFF;
+        jIndex = (jIndex + s[iIndex]) & 0xFF;
+        std::swap(s[iIndex], s[jIndex]);
+
+        unsigned char kByte = s[(s[iIndex] + s[jIndex]) & 0xFF];
+        output[k] = data[k] ^ kByte;
+    }
+
+    return output;
+}
