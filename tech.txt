@@ -43,116 +43,40 @@ Window Procedure Injection (SetWindowLongPtr)
 Shared Memory Section Injection (Section Objects)
 
 1. Indirect Syscall Shellcode Execution (Syswhispers / Hell's Gate style)
-Ý tưởng: Bỏ qua hoàn toàn Windows API, thay vào đó gọi trực tiếp syscall ẩn danh (bypass API hook).
-
-Dùng syscall từ shellcode hoặc inline assembly.
-
-Có thể kết hợp với Heaven’s Gate trong môi trường WOW64.
-
-✅ Bypass nhiều EDR như CrowdStrike, SentinelOne.
-
-❌ Phức tạp, yêu cầu signature syscall ID từng OS build.
 
 2. Suspend → Inject → Alertable Wait + APC
-Biến thể của APC Injection:
-
-Tìm một thread đang không alertable → tạm dừng nó.
-
-Đưa nó vào trạng thái alertable bằng NtDelayExecution.
-
-Gọi QueueUserAPC để shellcode thực thi.
-
-✅ Biến một thread không hữu dụng thành công cụ tấn công.
-
-❌ Timing phức tạp, dễ crash nếu quản lý thread kém.
 
 3. DLL Hollowing
-Tương tự process hollowing, nhưng thay vì PE, bạn tải một DLL vào tiến trình và ghi đè nội dung hàm export.
-
-✅ Lừa hệ thống rằng DLL đang chạy là hợp lệ.
-
-❌ EDR có thể detect nếu kiểm tra EntryPoint và CheckSum.
 
 4. Shellcode Reflective Loader
-Ý tưởng: Dùng shellcode có khả năng tự load chính nó như một DLL → reflective shellcode.
-
-Thường dùng với kỹ thuật như manual mapping.
-
-✅ Không cần LoadLibrary, không tạo DLL thật trên disk.
-
-❌ Khó viết shellcode phản chiếu đúng chuẩn PE.
 
 5. GDI Callback Injection (e.g., SetWindowsHookEx)
-Ý tưởng: Dùng hook GUI để tiêm shellcode.
 
-Ví dụ: SetWindowsHookEx(WH_CBT, ...)
-
-Được dùng trong keylogger, GUI backdoor.
-
-✅ Gần như không bị chú ý nếu inject vào process GUI như explorer.exe.
-
-❌ Không dùng được trên process không có message loop.
 
 6. Portable Executable Overwriting (In-memory PE overwrite)
-Ghi đè một vùng của PE hợp lệ trong RAM bằng shellcode, chỉnh sửa header cho khớp.
 
-✅ Shellcode giống như đang là đoạn mã hợp lệ.
-
-❌ Khó maintain.
 
 7. Global Atom Table + RtlCreateUserThread
-Biến thể của AtomBombing nhưng dùng thêm RtlCreateUserThread để kích hoạt shellcode.
 
-✅ Bypass AV khi kết hợp các kỹ thuật "atom + ntdll".
 
 8. Shellcode via UserCallback (User32!xxxClientAllocWindowClassExtraBytes)
-Tiêm shellcode vào hàm callback nội bộ của USER32 → chạy khi GUI window tạo class mới.
 
-✅ Siêu stealth, khó bị theo dõi.
-
-❌ Cần kiến thức rất sâu về Win32k.sys.
 
 9. Image File Execution Options (IFEO) Hijacking + Shellcode
-Chỉnh registry Image File Execution Options để inject shellcode khi app được chạy (thường là debug hook hoặc hijack EXE).
 
-✅ Dùng nhiều trong persistence.
-
-❌ Bị nhiều EDR giám sát registry này.
 
 10. Callback-based Injection via NtSetInformationObject
-Đưa shellcode vào đối tượng kernel mode (như Timer, Mutex) dùng API ẩn NtSetInformationObject.
 
-✅ Không dùng WriteProcessMemory, stealth hơn.
-
-❌ Yêu cầu deep knowledge kernel objects.
 
 11. PE Injection via Manual Mapping with Shellcode Launcher
-Shellcode chứa PE loader nhỏ, tự map PE từ chính nó (giống như loader trong Metasploit).
 
-✅ Bypass được rất nhiều detection.
-
-❌ Phức tạp hơn shellcode thường.
 
 12. Inject vào Process chưa khởi chạy (Image-level injection)
-Dùng CreateProcess(..., CREATE_SUSPENDED) rồi ghi shellcode vào vùng image chưa được map đầy đủ, trước khi tiến trình chạy.
-
-✅ Tránh detection qua thread injection.
-
-❌ Timing rất quan trọng, dễ crash.
 
 13. Thread Hijacking + Shellcode via Stack Pivoting
-Ghi shellcode vào stack của một thread đang chạy, rồi dùng ROP chain để pivot stack.
 
-✅ Đặc biệt stealth, bypass stack scan.
-
-❌ Cần kỹ năng ROP.
 
 14. Callback Hijacking via COM / WMI (e.g., Event Consumer)
-Sử dụng callback COM/WMI làm vector thực thi shellcode.
-
-✅ Tồn tại lâu dài, khó bị xóa.
-
-❌ EDR thường kiểm tra WMI Event Consumer.
 
 Shellcode Injection
 ├── I. Basic Techniques
@@ -207,3 +131,70 @@ Shellcode Injection
 │   ├── VTL0 Injection (Virtual Trust Level - kernel bypass)
 │   ├── DTrace / WPP Debug Callback Injection
 │   └── Secure Boot Bypass + Signed Shellcode Load
+
+
+Shellcode Injection
+├── I. Basic Techniques
+│   ├── WriteProcessMemory + CreateRemoteThread
+│   ├── SetWindowsHookEx
+│   ├── CreateThread + VirtualAlloc/WriteMemory
+│   ├── QueueUserAPC (với thread alertable)
+│   ├── RemoteThread hijacking (Suspend + RtlCreateUserThread)
+│   └── DLL Injection (classic)
+│
+├── II. Intermediate / Anti-Detection
+│   ├── Process Hollowing
+│   ├── Thread Execution Hijacking
+│   ├── Reflective DLL Injection
+│   ├── Manual Mapping (PE loader tự viết)
+│   ├── AtomBombing (GlobalAtom + APC)
+│   ├── Early Bird Injection (inject khi process chưa chạy)
+│   └── Process Doppelgänging (NTFS transacted files)
+│
+├── III. Advanced / Evasion
+│   ├── Heaven’s Gate (WOW64 to x64 switch)
+│   ├── Hell’s Gate (Direct Syscall syscall stubs)
+│   ├── Indirect Syscall (syswhispers/ngn)
+│   ├── Shellcode Stack Pivot (ROP-style shellcode execution)
+│   ├── IAT Hook Injection (alter imported API pointer)
+│   ├── GDI Callback Injection (EnumWindows, CBT hook…)
+│   ├── DLL Hollowing (overwrite DLL image)
+│   └── Shared Memory Injection (FileMapping section)
+│
+├── IV. Obscure / Rare Techniques
+│   ├── KernelCallbackTable Injection
+│   ├── NtSetInformationObject Callback
+│   ├── Shellcode trong Registry (IFEO / Run keys / AppInit_DLLs)
+│   ├── Shellcode trong Alternate Data Streams (ADS)
+│   ├── INI File Injection + Hijacked Loader
+│   ├── Font Exploit Shellcode Trigger
+│   ├── ETW Callback Hijack
+│   └── EnumDesktops Callback Shellcode
+│
+├── V. Persistence + Execution
+│   ├── COM Hijacking
+│   ├── WMI Event Consumer (script or shellcode trigger)
+│   ├── Scheduled Task trigger (w/ encoded shellcode)
+│   ├── Services registry hijack
+│   └── Startup folder with dropper + shellcode in memory
+│
+├── VI. Kernel-Level / APT
+│   ├── MDL Injection (Memory Descriptor List abuse)
+│   ├── EFI Injection (bootkit-level persistence)
+│   ├── Hypervisor Injection (Bluepill / SMM level)
+│   ├── Driver-based Manual Mapping
+│   ├── VTL0 Injection (Virtual Trust Level - kernel bypass)
+│   ├── DTrace / WPP Debug Callback Injection
+│   └── Secure Boot Bypass + Signed Shellcode Load
+│
+└── VII. Supplemental / Elite Techniques
+    ├── Phantom DLL Hollowing (inject vào vùng bị mapped bởi DLL bị delete)
+    ├── Inverted Hollowing (self hollowing từ process của chính mình)
+    ├── IFEO Debugger Chain Shellcode Trigger (debugger = shellcode)
+    ├── Malicious Handle Table Injection (handle table -> callback shellcode)
+    ├── Threadless Execution (NtContinue + Context spoof)
+    ├── RDTSC Timer Triggered Shellcode (vòng lặp dùng timestamp để jump)
+    ├── LOLBin Shellcode Loader (msbuild / regsvr32 / installutil…)
+    ├── Function Trampoline Hijack (hook call/jump → shellcode)
+    ├── WOW64 APC Injection (APC vào 64-bit từ 32-bit)
+    └── XFG-safe ROP-based Execution (cơ chế chống exploit Windows mới)
