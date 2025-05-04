@@ -1,1 +1,61 @@
 https://github.com/Offensive-Panda/ProcessInjectionTechniques
+
+1. Thêm đường dẫn include (để dùng #include "peconv.h")
+Mở Visual Studio 2022.
+
+Mở Solution PELoader.sln.
+
+Chuột phải vào project trong Solution Explorer (có thể là PELoader), chọn Properties.
+
+Vào mục:
+
+mathematica
+Sao chép
+Chỉnh sửa
+Configuration Properties > C/C++ > General
+Tại mục Additional Include Directories, thêm đường dẫn đến thư mục chứa peconv.h. Trong trường hợp của bạn là:
+
+makefile
+Sao chép
+Chỉnh sửa
+$(SolutionDir)libpeconv\include
+hoặc cụ thể hơn:
+
+makefile
+Sao chép
+Chỉnh sửa
+$(SolutionDir)libpeconv\include\peconv
+✅ 2. Thêm thư viện .lib để link (libpeconv.lib, libpeconv32.lib)
+Trong Properties của project, vào:
+
+mathematica
+Sao chép
+Chỉnh sửa
+Configuration Properties > Linker > Input
+Trong Additional Dependencies, thêm:
+
+vbnet
+Sao chép
+Chỉnh sửa
+libpeconv.lib
+libpeconv32.lib
+Tiếp theo, vào:
+
+mathematica
+Sao chép
+Chỉnh sửa
+Configuration Properties > Linker > General
+Tại Additional Library Directories, thêm:
+
+javascript
+Sao chép
+Chỉnh sửa
+$(SolutionDir)libpeconv
+✅ 3. Kiểm tra
+Sau khi đã cấu hình:
+
+Sử dụng #include "peconv.h" trong mã nguồn.
+
+Gọi hàm hoặc sử dụng đối tượng từ peconv nếu cần.
+
+Build lại project.
