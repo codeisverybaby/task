@@ -1,0 +1,10 @@
+^D:\INJECT\THREAD_NAMECALLING\BUILD\CMAKEFILES\8E4256363258948CFFC9D438EA1390D1\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/inject/thread_namecalling -BD:/inject/thread_namecalling/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file D:/inject/thread_namecalling/build/thread_namecalling_demo.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

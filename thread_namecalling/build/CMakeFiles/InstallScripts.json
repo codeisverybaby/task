@@ -1,0 +1,10 @@
+{
+	"InstallScripts" : 
+	[
+		"D:/inject/thread_namecalling/build/cmake_install.cmake",
+		"D:/inject/thread_namecalling/build/thread_namecaller/cmake_install.cmake",
+		"D:/inject/thread_namecalling/build/thread_receive/cmake_install.cmake",
+		"D:/inject/thread_namecalling/build/dll_inj/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

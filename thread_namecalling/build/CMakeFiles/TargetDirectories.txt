@@ -1,0 +1,12 @@
+D:/inject/thread_namecalling/build/CMakeFiles/INSTALL.dir
+D:/inject/thread_namecalling/build/CMakeFiles/ALL_BUILD.dir
+D:/inject/thread_namecalling/build/CMakeFiles/ZERO_CHECK.dir
+D:/inject/thread_namecalling/build/thread_namecaller/CMakeFiles/thread_namecaller.dir
+D:/inject/thread_namecalling/build/thread_namecaller/CMakeFiles/INSTALL.dir
+D:/inject/thread_namecalling/build/thread_namecaller/CMakeFiles/ALL_BUILD.dir
+D:/inject/thread_namecalling/build/thread_receive/CMakeFiles/thread_receive.dir
+D:/inject/thread_namecalling/build/thread_receive/CMakeFiles/INSTALL.dir
+D:/inject/thread_namecalling/build/thread_receive/CMakeFiles/ALL_BUILD.dir
+D:/inject/thread_namecalling/build/dll_inj/CMakeFiles/dll_inj.dir
+D:/inject/thread_namecalling/build/dll_inj/CMakeFiles/INSTALL.dir
+D:/inject/thread_namecalling/build/dll_inj/CMakeFiles/ALL_BUILD.dir

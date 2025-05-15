@@ -1,0 +1,5 @@
+﻿  Building Custom Rule D:/inject/thread_namecalling/thread_receive/CMakeLists.txt
+  main.cpp
+  thread_receive.vcxproj -> D:\inject\thread_namecalling\build\thread_receive\Release\thread_receive.exe
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.

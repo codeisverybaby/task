@@ -1,0 +1,10 @@
+^D:\INJECT\THREAD_NAMECALLING\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/inject/thread_namecalling -BD:/inject/thread_namecalling/build --check-stamp-file D:/inject/thread_namecalling/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

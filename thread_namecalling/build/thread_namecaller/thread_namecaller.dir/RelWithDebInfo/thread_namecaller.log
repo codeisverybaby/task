@@ -1,0 +1,19 @@
+﻿  Building Custom Rule D:/inject/thread_namecalling/thread_namecaller/CMakeLists.txt
+  common.cpp
+D:\inject\thread_namecalling\ntdll_undoc.h(4,9): warning C4005: 'NT_SUCCESS': macro redefinition
+  (compiling source file '../../common.cpp')
+      D:\inject\thread_namecalling\ntddk.h(32,9):
+      see previous definition of 'NT_SUCCESS'
+  
+  ntdll_wrappers.cpp
+D:\inject\thread_namecalling\ntdll_undoc.h(4,9): warning C4005: 'NT_SUCCESS': macro redefinition
+  (compiling source file '../../ntdll_wrappers.cpp')
+      D:\inject\thread_namecalling\ntddk.h(32,9):
+      see previous definition of 'NT_SUCCESS'
+  
+  main.cpp
+D:\inject\thread_namecalling\thread_namecaller\main.cpp(31,13): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+  Generating Code...
+  thread_namecaller.vcxproj -> D:\inject\thread_namecalling\build\thread_namecaller\RelWithDebInfo\thread_namecaller.exe
+  'pwsh.exe' is not recognized as an internal or external command,
+  operable program or batch file.
