@@ -1,0 +1,31 @@
+| Tiêu chí                        | KrakenMask                                       | Ekko                                   | Cronos                         | FOLIAGE                                |
+| ------------------------------- | ------------------------------------------------ | -------------------------------------- | ------------------------------ | -------------------------------------- |
+| **Mã hóa vùng nhớ**             | ✔ RC4 `.text` + tạo key mới mỗi sleep            | ✔ RC4 shellcode nhỏ                    | ✔ RC4 `.text` toàn tiến trình  | ✔ RC4 `.text` toàn tiến trình          |
+| **Cơ chế Sleep**                | QueueUserAPC + ROP chain                         | `CreateTimerQueueTimer` + `NtContinue` | WaitableTimer + ROP            | APC + ROP                              |
+| **Return Address Spoofing**     | ✔ Có (ntdll gadget)                              | ❌ Không                                | ❌ Không                        | ❌ Không                                |
+| **Stack Masking / Obfuscation** | ✔ Có (ghi đè stack)                              | ❌ Không                                | ❌ Không                        | ❌ Không                                |
+| **Bypass EDR/EDR Hooks tốt**    | ✔✔✔ Khó detect bằng PE-Sieve, Moneta, HuntBeacon | ✔ Dễ detect bởi các EDR hiện đại       | ✔ Có thể bị PE-Sieve phát hiện | ✔ Tốt hơn Cronos nhưng vẫn có dấu hiệu |
+| **Anti-forensics (ẩn dấu vết)** | ✔✔✔ Cao                                          | ✔ Thấp                                 | ✔ Trung bình                   | ✔ Trung bình-khá                       |
+| **Độ phức tạp triển khai**      | ❗ Cao                                            | ✅ Thấp                                 | ⚠️ Trung bình                  | ⚠️ Trung bình                          |
+| **Hiệu quả thực tế**            | ⭐⭐⭐⭐⭐                                            | ⭐⭐                                     | ⭐⭐⭐                            | ⭐⭐⭐                                    |
+
+| Kỹ thuật       | Hiệu quả (ẩn mình + bypass) | Ưu điểm chính                                       | Nhược điểm                                             |
+| -------------- | --------------------------- | --------------------------------------------------- | ------------------------------------------------------ |
+| **KrakenMask** | 🟩🟩🟩🟩🟩 (Tốt nhất)       | Mã hóa `.text`, spoof return address, stack masking | Rất phức tạp để triển khai đúng                        |
+| **Ekko**       | 🟨🟨 (Tạm ổn)               | Dễ viết, nhỏ gọn                                    | Bị detect bởi Defender và EDR đời mới                  |
+| **Cronos**     | 🟨🟨🟨 (Trung bình)         | Kết hợp ROP + mã hóa `.text`                        | Thiếu spoof stack/return                               |
+| **FOLIAGE**    | 🟨🟨🟨 (Trung bình-khá)     | Obfuscate tốt hơn Cronos, dùng APC                  | Không spoof return, vẫn bị detect nếu stack bị inspect |
+
+✅ Kết luận
+🔥 KrakenMask là kỹ thuật hiệu quả nhất, an toàn nhất, và ẩn mình giỏi nhất trong 4 kỹ thuật nếu được triển khai đúng cách.
+
+✔ Tích hợp nhiều lớp bảo vệ: mã hóa, spoof return, stack masking.
+
+❗ Cần hiểu rõ về Windows internals, ROP, và thread context để triển khai đúng.
+
+🧪 Nếu bạn cần POC nhanh, dễ hiểu → dùng Ekko.
+
+🔧 Nếu bạn cần kỹ thuật trung bình để test trên EDR cũ → dùng Cronos hoặc FOLIAGE.
+
+🛡️ Nếu muốn xây dựng malware thực sự khó detect và anti-forensics → KrakenMask là lựa chọn hàng đầu.
+
