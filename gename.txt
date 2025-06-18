@@ -1,0 +1,49 @@
+#include <windows.h>
+#include <string>
+#include <sstream>
+#include <iomanip>
+#include <stdint.h>
+
+uint32_t crc32(const uint8_t* data, size_t len) {
+    uint32_t crc = 0xFFFFFFFF;
+    while (len--) {
+        crc ^= *data++;
+        for (int i = 0; i < 8; ++i)
+            crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
+    }
+    return ~crc;
+}
+
+std::string generateStealthySharedMappingName()
+{
+    DWORD pid = GetCurrentProcessId();
+
+    // Lấy địa chỉ ntdll.dll từ PEB → luôn tồn tại
+    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
+
+    // Lấy kernel32.dll nếu có
+    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
+
+    uintptr_t ntdllBase = reinterpret_cast<uintptr_t>(hNtdll);
+    uintptr_t kernel32Base = hKernel32 ? reinterpret_cast<uintptr_t>(hKernel32) : 0;
+
+    // Tạo seed buffer
+    uint8_t seedData[sizeof(pid) + sizeof(kernel32Base) + sizeof(ntdllBase)] = { 0 };
+    size_t offset = 0;
+
+    memcpy(seedData + offset, &pid, sizeof(pid));
+    offset += sizeof(pid);
+
+    memcpy(seedData + offset, &kernel32Base, sizeof(kernel32Base));
+    offset += sizeof(kernel32Base);
+
+    memcpy(seedData + offset, &ntdllBase, sizeof(ntdllBase));
+
+    // Tính CRC32 từ seed
+    uint32_t hash = crc32(seedData, sizeof(seedData));
+
+    // Sinh tên cuối cùng
+    std::ostringstream oss;
+    oss << "Map_" << std::hex << std::uppercase << std::setw(8) << std::setfill('0') << hash;
+    return oss.str(); // Ví dụ: "Map_92AB17F3"
+}
