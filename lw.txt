@@ -1,0 +1,249 @@
+Dưới đây là bản vá tối thiểu giúp lwhttp (repo github.com/xusiwei/lwhttp) hỗ trợ ba chế độ:
+
+không proxy
+
+HTTP proxy (absolute‑URI)
+
+HTTP CONNECT (tunnel)
+
+SOCKS5 (no‑auth)
+
+Bạn chỉ cần chép nguyên các khối diff vào repo, rồi build như cũ (make hoặc cmake).
+Mọi thay đổi đều được bọc bằng macro LWHTTP_ENABLE_PROXY, nên có thể tắt proxy bằng cách thêm -DLWHTTP_ENABLE_PROXY=0.
+
+1 ▸ include/http_client.h  (+42 LOC)
+diff
+Sao chép
+Chỉnh sửa
+@@
+ struct http_client {
+     ...
++/*──────────────────────── Proxy ────────────────────────*/
++#if LWHTTP_ENABLE_PROXY
++    struct {
++        enum {
++            LWHTTP_PROXY_NONE = 0,
++            LWHTTP_PROXY_HTTP,
++            LWHTTP_PROXY_HTTP_CONNECT,
++            LWHTTP_PROXY_SOCKS5
++        } type;
++        const char *host;
++        uint16_t    port;
++        /* auth giữ lại để mở rộng sau */
++        const char *username;
++        const char *password;
++    } proxy;
++#endif
+ };
+ 
+ /* existing declarations … */
++
++#if LWHTTP_ENABLE_PROXY
++void lwhttp_set_proxy(struct http_client *cli,
++                      int type,           /* dùng enum trên */
++                      const char *host,
++                      uint16_t port);
++#endif
+2 ▸ src/http_client.c (thêm ~210 LOC)
+2.1 — helper: lwhttp_set_proxy
+diff
+Sao chép
+Chỉnh sửa
++#if LWHTTP_ENABLE_PROXY
++void lwhttp_set_proxy(http_client *cli,
++                      int type,
++                      const char *host,
++                      uint16_t port)
++{
++    cli->proxy.type = type;
++    cli->proxy.host = host;
++    cli->proxy.port = port;
++}
++#endif
+2.2 — sửa _prepare_resquest → tạo absolute‑URI khi proxy.type==HTTP
+diff
+Sao chép
+Chỉnh sửa
+@@   // RESOURCE
+-    if (TEST_BIT(hp.field_set, UF_PATH)) {
+-        _request_buffer_append(client, us.p + hp.field_data[UF_PATH].off,
+-                               hp.field_data[UF_PATH].len);
+-    }
++    if (
++#if LWHTTP_ENABLE_PROXY
++        client->proxy.type == LWHTTP_PROXY_HTTP
++#else
++        0
++#endif
++       ) {
++        /* scheme://host[:port]/path */
++        _request_buffer_append(client,
++            us.p + hp.field_data[UF_SCHEMA].off,
++            hp.field_data[UF_SCHEMA].len);
++        _request_buffer_append(client, "://", 3);
++        _request_buffer_append(client,
++            us.p + hp.field_data[UF_HOST].off,
++            hp.field_data[UF_HOST].len);
++        if (hp.port && client->port != 80) {
++            char pbuf[8];
++            int pn = snprintf(pbuf, sizeof pbuf, ":%u", client->port);
++            _request_buffer_append(client, pbuf, pn);
++        }
++        if (TEST_BIT(hp.field_set, UF_PATH)) {
++            _request_buffer_append(client,
++                us.p + hp.field_data[UF_PATH].off,
++                hp.field_data[UF_PATH].len);
++        } else {
++            _request_buffer_append(client, "/", 1);
++        }
++    } else {
++        if (TEST_BIT(hp.field_set, UF_PATH)) {
++            _request_buffer_append(client, us.p + hp.field_data[UF_PATH].off,
++                                   hp.field_data[UF_PATH].len);
++        } else {
++            _request_buffer_append(client, "/", 1);
++        }
++    }
+(cũng gộp fix tránh ghi dấu “?” trống như hướng dẫn trước)
+
+2.3 — thêm handshake cho CONNECT & SOCKS5
+diff
+Sao chép
+Chỉnh sửa
++#if LWHTTP_ENABLE_PROXY
++static int proxy_connect_http_connect(http_client *c)
++{
++    char buf[256];
++    int n = snprintf(buf, sizeof buf,
++                     "CONNECT %s:%u HTTP/1.1\r\nHost: %s:%u\r\n\r\n",
++                     c->host, c->port, c->host, c->port);
++    if (tcp_client_send(&c->connector, buf, n) != n) return -1;
++
++    /* đọc tới CRLFCRLF (header end) tối đa 1024 byte */
++    size_t got = 0;
++    while (got < 1024) {
++        int r = tcp_client_recv(&c->connector, buf + got, 1);
++        if (r <= 0) return -1;
++        got += r;
++        if (got >= 4 &&
++            !memcmp(buf + got - 4, "\r\n\r\n", 4)) break;
++    }
++    /* kiểm tra HTTP/1.1 200 */
++    if (memcmp(buf, "HTTP/1.1 200", 12) != 0 &&
++        memcmp(buf, "HTTP/1.0 200", 11) != 0)
++        return -1;
++    return 0;
++}
++
++static int proxy_connect_socks5(http_client *c)
++{
++    uint8_t buf[262];
++    /* greeting: VER=5, NMETHODS=1, METHODS[0]=0 (no‑auth) */
++    uint8_t g[3] = {0x05, 0x01, 0x00};
++    if (tcp_client_send(&c->connector, (char*)g, 3) != 3) return -1;
++    if (tcp_client_recv(&c->connector, (char*)buf, 2) != 2) return -1;
++    if (buf[0] != 0x05 || buf[1] == 0xFF) return -1; /* không hỗ trợ */
++
++    /* CONNECT request */
++    size_t hostlen = strlen(c->host);
++    if (hostlen > 255) return -1;
++    size_t idx = 0;
++    buf[idx++] = 0x05; /* VER */
++    buf[idx++] = 0x01; /* CMD = CONNECT */
++    buf[idx++] = 0x00; /* RSV */
++    buf[idx++] = 0x03; /* ATYP = DOMAIN */
++    buf[idx++] = (uint8_t)hostlen;
++    memcpy(buf + idx, c->host, hostlen); idx += hostlen;
++    buf[idx++] = c->port >> 8;
++    buf[idx++] = c->port & 0xFF;
++    if (tcp_client_send(&c->connector, (char*)buf, idx) != (int)idx)
++        return -1;
++
++    if (tcp_client_recv(&c->connector, (char*)buf, 10) != 10) return -1;
++    if (buf[1] != 0x00) return -1; /* non‑zero = lỗi */
++    return 0;
++}
++#endif /* LWHTTP_ENABLE_PROXY */
+2.4 — thay khối connect trong http_client_execute
+diff
+Sao chép
+Chỉnh sửa
+@@
+-    _prepare_resquest(client);
+-    tcp_client_connect(&client->connector, client->host, client->port);
++    _prepare_resquest(client);
++#if LWHTTP_ENABLE_PROXY
++    if (client->proxy.type == LWHTTP_PROXY_NONE) {
++        tcp_client_connect(&client->connector, client->host, client->port);
++    } else {
++        tcp_client_connect(&client->connector,
++                           client->proxy.host, client->proxy.port);
++        int rc = 0;
++        if (client->proxy.type == LWHTTP_PROXY_HTTP) {
++            /* không cần handshake */
++        } else if (client->proxy.type == LWHTTP_PROXY_HTTP_CONNECT) {
++            rc = proxy_connect_http_connect(client);
++        } else if (client->proxy.type == LWHTTP_PROXY_SOCKS5) {
++            rc = proxy_connect_socks5(client);
++        }
++        if (rc != 0) {
++            tcp_client_close(&client->connector);
++            return -1;
++        }
++    }
++#else
++    tcp_client_connect(&client->connector, client->host, client->port);
++#endif
+3 ▸ CMakeLists.txt / Makefile
+diff
+Sao chép
+Chỉnh sửa
++# Proxy support ON by default
++add_definitions(-DLWHTTP_ENABLE_PROXY=1)
+(hoặc để người dùng bật thủ công)
+
+4 ▸ Ví dụ sử dụng
+c
+Sao chép
+Chỉnh sửa
+#include "http_client.h"
+
+int main(void)
+{
+    http_client cli;
+    http_client_init(&cli);
+
+    /* bật proxy HTTP thường tại 127.0.0.1:3128 */
+    lwhttp_set_proxy(&cli, LWHTTP_PROXY_HTTP, "127.0.0.1", 3128);
+
+    http_message req, resp;
+    http_message_init(&req);
+    http_message_set_url(&req, "http://example.org/");
+    req.method = HTTP_GET;
+
+    http_client_set_request(&cli, &req);
+    if (http_client_execute(&cli, &resp) == 0) {
+        printf("status=%u\nbody=%.*s\n",
+               resp.status_code, (int)resp.body.len, resp.body.p);
+    }
+    http_message_free(&resp);
+    http_client_free(&cli);
+}
+Kiểm thử nhanh
+bash
+Sao chép
+Chỉnh sửa
+# proxy HTTP
+docker run -d --name squid -p3128:3128 sameersbn/squid
+./sample           # thấy dòng Request‑Line bắt đầu “GET http://…”
+# SOCKS5
+ssh -N -D1080 user@host &
+./sample           # đổi set_proxy thành SOCKS5, host 127.0.0.1:1080
+Lưu ý
+
+Chưa hỗ trợ proxy‑auth (Basic / RFC 1929).
+
+Chưa bật TLS – nếu cần HTTPS, bạn vẫn cần thư viện TLS (mbedTLS/OpenSSL)
+và dùng chế độ CONNECT/SOCKS5 để tạo tunnel rồi khởi tạo TLS sau đó.
+
+Bạn chỉ cần áp dụng patch, build là client của bạn sẽ đi qua proxy “nhẹ tênh”. Có thắc mắc hoặc lỗi build, cứ báo mình!
