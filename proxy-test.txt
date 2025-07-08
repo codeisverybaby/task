@@ -1,0 +1,202 @@
+// Program.cs
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net.Sockets;
+using System.Net;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace SimpleProxy
+{
+    internal static class Program
+    {
+        private const string LISTEN_IP = "127.0.0.1";
+        private const int LISTEN_PORT = 5000;
+        private const string USERNAME = "user";
+        private const string PASSWORD = "pass";
+        private const int BUF_SIZE = 64 * 1024;
+
+        private static readonly string AUTH_EXPECT =
+            "Basic " + Convert.ToBase64String(Encoding.ASCII.GetBytes($"{USERNAME}:{PASSWORD}"));
+
+        private static async Task Main()
+        {
+            var listener = new TcpListener(IPAddress.Parse(LISTEN_IP), LISTEN_PORT);
+            listener.Start();
+            Console.WriteLine($"Proxy ready at http://{USERNAME}:{PASSWORD}@{LISTEN_IP}:{LISTEN_PORT}");
+
+            while (true)
+            {
+                var client = await listener.AcceptTcpClientAsync();
+                _ = Task.Run(() => HandleClientAsync(client));
+            }
+        }
+
+        private static async Task HandleClientAsync(TcpClient client)
+        {
+            using var cli = client;
+            var cliStream = cli.GetStream();
+
+            try
+            {
+                // --- Đọc tới hết header ---
+                var (firstLine, headers, bodyLeft) = await ReadHeadersAsync(cliStream);
+                if (firstLine == null)
+                    return; // client đóng sớm
+
+                // --- Xác thực ---
+                if (!headers.TryGetValue("proxy-authorization", out var auth)
+                    || auth != AUTH_EXPECT)
+                {
+                    await Send407Async(cliStream);
+                    return;
+                }
+
+                var tokens = firstLine.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
+                if (tokens.Length != 3) return;
+                var method = tokens[0].ToUpperInvariant();
+                var target = tokens[1];
+                var version = tokens[2];
+
+                if (method == "CONNECT")
+                {
+                    // ------------ HTTPS tunnel ------------
+                    var hp = target.Split(':', 2);
+                    var host = hp[0];
+                    var port = hp.Length == 2 ? int.Parse(hp[1]) : 443;
+
+                    using var remote = new TcpClient();
+                    try
+                    {
+                        await remote.ConnectAsync(host, port);
+                    }
+                    catch
+                    {
+                        await cliStream.WriteAsync(Encoding.ASCII.GetBytes(
+                            "HTTP/1.1 502 Bad Gateway\r\n\r\n"));
+                        return;
+                    }
+
+                    await cliStream.WriteAsync(Encoding.ASCII.GetBytes(
+                        "HTTP/1.1 200 Connection Established\r\n\r\n"));
+
+                    await RelayBidirectionalAsync(cliStream, remote.GetStream());
+                    return;
+                }
+                else
+                {
+                    // ------------ HTTP thường ------------
+                    if (!Uri.TryCreate(target, UriKind.Absolute, out var uri))
+                        uri = new Uri("http://" + target); // client có thể gửi dạng absolute URI
+
+                    var host = uri.Host;
+                    var port = uri.Port != -1 ? uri.Port : (uri.Scheme == "https" ? 443 : 80);
+
+                    using var remote = new TcpClient();
+                    try
+                    {
+                        await remote.ConnectAsync(host, port);
+                    }
+                    catch
+                    {
+                        await cliStream.WriteAsync(Encoding.ASCII.GetBytes(
+                            "HTTP/1.1 502 Bad Gateway\r\n\r\n"));
+                        return;
+                    }
+
+                    var remoteStream = remote.GetStream();
+
+                    // Bỏ header Proxy‑Authorization rồi forward
+                    var sb = new StringBuilder();
+                    sb.Append($"{method} {uri.PathAndQuery} {version}\r\n");
+                    foreach (var (k, v) in headers)
+                        if (k != "proxy-authorization")
+                            sb.Append($"{k}: {v}\r\n");
+                    sb.Append("\r\n");
+
+                    await remoteStream.WriteAsync(Encoding.ASCII.GetBytes(sb.ToString()));
+                    if (bodyLeft.Length > 0)
+                        await remoteStream.WriteAsync(bodyLeft);
+
+                    await RelayBidirectionalAsync(cliStream, remoteStream);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[!] Handler error: {ex.Message}");
+            }
+        }
+
+        // ---------- Helpers ----------
+        private static async Task<(string?, Dictionary<string, string>, byte[])>
+            ReadHeadersAsync(NetworkStream ns)
+        {
+            var ms = new MemoryStream();
+            var buffer = new byte[BUF_SIZE];
+            int bytesRead;
+            while ((bytesRead = await ns.ReadAsync(buffer, 0, buffer.Length)) > 0)
+            {
+                ms.Write(buffer, 0, bytesRead);
+                if (TryFindHeaderEnd(ms.GetBuffer(), (int)ms.Length, out var end))
+                {
+                    var headerBytes = ms.GetBuffer()[..end];
+                    var bodyBytes = ms.GetBuffer()[(end + 4)..(int)ms.Length];
+                    var headerText = Encoding.ASCII.GetString(headerBytes);
+                    var lines = headerText.Split("\r\n", StringSplitOptions.None);
+
+                    var first = lines[0];
+                    var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    for (int i = 1; i < lines.Length; i++)
+                    {
+                        if (string.IsNullOrEmpty(lines[i])) continue;
+                        var idx = lines[i].IndexOf(':');
+                        if (idx <= 0) continue;
+                        var k = lines[i][..idx].Trim();
+                        var v = lines[i][(idx + 1)..].Trim();
+                        dict[k] = v;
+                    }
+                    return (first, dict, bodyBytes);
+                }
+                if (ms.Length > 16 * BUF_SIZE) break; // phòng loop vô hạn
+            }
+            return (null, new Dictionary<string, string>(), Array.Empty<byte>());
+        }
+
+        private static bool TryFindHeaderEnd(byte[] buf, int len, out int pos)
+        {
+            for (int i = 3; i < len; i++)
+            {
+                if (buf[i] == 0x0A && buf[i - 1] == 0x0D && buf[i - 2] == 0x0A && buf[i - 3] == 0x0D)
+                {
+                    pos = i - 3;
+                    return true;
+                }
+            }
+            pos = -1;
+            return false;
+        }
+
+        private static async Task Send407Async(NetworkStream ns)
+        {
+            var msg = "HTTP/1.1 407 Proxy Authentication Required\r\n" +
+                      "Proxy-Authenticate: Basic realm=\"SimpleProxy\"\r\n" +
+                      "Content-Length: 0\r\n\r\n";
+            await ns.WriteAsync(Encoding.ASCII.GetBytes(msg));
+        }
+
+        private static async Task RelayBidirectionalAsync(NetworkStream a, NetworkStream b)
+        {
+            var t1 = PumpAsync(a, b);
+            var t2 = PumpAsync(b, a);
+            await Task.WhenAny(t1, t2);
+            a.Close(); b.Close();
+        }
+
+        private static async Task PumpAsync(NetworkStream src, NetworkStream dst)
+        {
+            try { await src.CopyToAsync(dst, BUF_SIZE); }
+            catch { /* ignore */ }
+        }
+    }
+}
