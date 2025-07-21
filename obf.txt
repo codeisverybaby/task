@@ -1,0 +1,18 @@
+| Project           | Ngôn ngữ | Kiến trúc | Kỹ thuật chính                          |
+| ----------------- | -------- | --------- | --------------------------------------- |
+| Silent\_Packer    | C        | ELF32/64  | XOR/AES, section insertion, code cave   |
+| Packer\_ELF       | C + ASM  | ELF64     | Thêm section + stub decryptor           |
+| woody\_woodpacker | C + ASM  | ELF64 PIE | Injection qua code cave, stub decryptor |
+
+| Project           | Ngôn ngữ  | Kỹ thuật nổi bật                            |
+| ----------------- | --------- | ------------------------------------------- |
+| ELFREVGO          | Go        | Structure tampering (class/endian/sections) |
+| Silent\_Packer    | C         | XOR/AES, code cave, section insertion       |
+| cattleya          | Rust      | Multi thao tác ELF + GOT patch              |
+| ELF‑Toolchain     | C/C++     | Loader tự chạy, shuffling, packer đa tầng   |
+| kiteshield        | C++?      | Multi-layer, anti-debugging runtime         |
+| oplzkwp           | C         | Function-level encryption                   |
+| woody\_woodpacker | C         | PIE packer, stub decrypt                    |
+| AD\_1DA           | C         | Multi-layer, evade detection                |
+| bincrypter        | Bash/Perl | Runtime crypter, no temp files              |
+| pakkero           | Go        | Compression + launcher stub                 |
