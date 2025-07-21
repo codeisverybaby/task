@@ -22,3 +22,15 @@
 | elf‑stuff  | ✔ (ví dụ)    | ✔ (XOR, AES)    | ✔ Packer đơn giản | ✔                   |
 | sherlocked | ✔ (tích hợp) | ✔               | ✔                 | tương đối           |
 | kiteshield | ✔ mạnh       | ❌               | ✔ loader stub     | ❌                   |
+
+| Project               | Ngôn ngữ   | Encryption      | Anti-debug | Dynamic decrypt | ELF tampering     |
+| --------------------- | ---------- | --------------- | ---------- | --------------- | ----------------- |
+| oplzkwp               | C          | PRESENT         | ❌          | ✅ per-func      | ❌                 |
+| Kiteshield            | C/C++      | RC4 multi‑layer | ✅ mạnh     | ✅ runtime       | ❌                 |
+| Embuche               | C + Python | Basic           | ✅ snippet  | ❌               | ✅                 |
+| ELF-Toolchain         | C/C++      | Multi-tier      | ❌          | ✅ custom loader | ✅                 |
+| ELFREVGO              | Go         | ❌               | ❌          | ❌               | ✅ many operations |
+| elf-stuff             | C          | XOR/AES         | ✅ snippets | ❌               | ✅                 |
+| woody\_woodpacker     | C + ASM    | XOR             | ❌          | ✅ stub decrypt  | ✅ code cave       |
+| elf-x86\_64-obfuscate | Python/C   | PoC patch       | ❌          | ❌               | ✅                 |
+
