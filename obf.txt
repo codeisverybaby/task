@@ -16,3 +16,9 @@
 | AD\_1DA           | C         | Multi-layer, evade detection                |
 | bincrypter        | Bash/Perl | Runtime crypter, no temp files              |
 | pakkero           | Go        | Compression + launcher stub                 |
+
+| Project    | Anti‑debug   | Encryption mạnh | Runtime stub      | Structure tampering |
+| ---------- | ------------ | --------------- | ----------------- | ------------------- |
+| elf‑stuff  | ✔ (ví dụ)    | ✔ (XOR, AES)    | ✔ Packer đơn giản | ✔                   |
+| sherlocked | ✔ (tích hợp) | ✔               | ✔                 | tương đối           |
+| kiteshield | ✔ mạnh       | ❌               | ✔ loader stub     | ❌                   |
