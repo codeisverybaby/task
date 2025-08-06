@@ -1,0 +1,7 @@
+| Hệ thống                    | Có hỗ trợ `wlr-screencopy`? | Có dùng được `grim`? |
+| --------------------------- | --------------------------- | -------------------- |
+| **Sway** (Tiling WM)        | ✅ Có                        | ✅ Có                 |
+| **Hyprland**                | ✅ Có                        | ✅ Có                 |
+| **River**, **Wayfire**      | ✅ Có                        | ✅ Có                 |
+| **GNOME (mặc định Ubuntu)** | ❌ Không                     | ❌ Không              |
+| **KDE Plasma**              | ❌ Không                     | ❌ Không              |
