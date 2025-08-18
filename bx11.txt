@@ -1,0 +1,55 @@
+# toolchain
+export CC=arm-linux-gnueabihf-gcc
+export CXX=arm-linux-gnueabihf-g++
+export AR=arm-linux-gnueabihf-ar
+export RANLIB=arm-linux-gnueabihf-ranlib
+export LD=arm-linux-gnueabihf-ld
+export PKG_CONFIG=arm-linux-gnueabihf-pkg-config
+export PKG_CONFIG_PATH=/opt/arm/lib/pkgconfig:$PKG_CONFIG_PATH
+
+# configure
+./configure --host=arm-linux-gnueabihf --prefix=/opt/arm
+make -j$(nproc)
+make install
+
+export CC=i686-linux-gnu-gcc
+export CXX=i686-linux-gnu-g++
+export AR=i686-linux-gnu-ar
+export RANLIB=i686-linux-gnu-ranlib
+export LD=i686-linux-gnu-ld
+
+# 1. Cài package cần thiết trên Alpine
+apk add build-base git bash automake autoconf libtool pkgconfig \
+       xorgproto util-macros
+
+# Nếu có sẵn toolchain i686-linux-musl-gcc
+# Giả sử toolchain nằm ở /opt/cross/bin
+
+export PATH=/opt/cross/bin:$PATH
+export CC=i686-linux-musl-gcc
+export AR=i686-linux-musl-ar
+export RANLIB=i686-linux-musl-ranlib
+export LD=i686-linux-musl-ld
+export PKG_CONFIG_PATH=/usr/lib/pkgconfig:/usr/share/pkgconfig
+
+# 2. Clone source X11
+git clone https://gitlab.freedesktop.org/xorg/lib/libx11.git
+cd libx11
+
+# 3. Chuẩn bị build system
+./autogen.sh
+
+# 4. Configure với toolchain 32-bit
+./configure \
+    --host=i686-linux-musl \
+    --prefix=/opt/libx11-i686 \
+    --disable-shared \
+    --enable-static \
+    CFLAGS="-O2 -m32" \
+    LDFLAGS="-m32"
+
+# 5. Build
+make -j$(nproc)
+
+# 6. Cài vào prefix
+make install
