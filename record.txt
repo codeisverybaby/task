@@ -1,0 +1,180 @@
+#include <windows.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
+#include <dsound.h>
+#include <mmreg.h>
+#include <iostream>
+#include <fstream>
+#include <vector>
+
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "dsound.lib")
+#pragma comment(lib, "dxguid.lib")
+#pragma comment(lib, "winmm.lib")
+
+// Hàm ghi header WAV
+void WriteWavHeader(std::ofstream& file, int sampleRate, int channels, int bitsPerSample, int dataSize) {
+    int byteRate = sampleRate * channels * bitsPerSample / 8;
+    int blockAlign = channels * bitsPerSample / 8;
+    int chunkSize = 36 + dataSize;
+
+    file.write("RIFF", 4);
+    file.write((char*)&chunkSize, 4);
+    file.write("WAVE", 4);
+    file.write("fmt ", 4);
+
+    int subChunk1Size = 16;
+    short audioFormat = 1; // PCM
+    file.write((char*)&subChunk1Size, 4);
+    file.write((char*)&audioFormat, 2);
+    file.write((char*)&channels, 2);
+    file.write((char*)&sampleRate, 4);
+    file.write((char*)&byteRate, 4);
+    file.write((char*)&blockAlign, 2);
+    file.write((char*)&bitsPerSample, 2);
+
+    file.write("data", 4);
+    file.write((char*)&dataSize, 4);
+}
+
+// ---------------- MIC (DirectSound) ----------------
+void RecordMic() {
+    LPDIRECTSOUNDCAPTURE8 pCapture = nullptr;
+    LPDIRECTSOUNDCAPTUREBUFFER pCaptureBuffer = nullptr;
+
+    if (FAILED(DirectSoundCaptureCreate8(NULL, &pCapture, NULL))) {
+        std::cout << "Failed to create capture device\n";
+        return;
+    }
+
+    // PCM 16-bit, 44.1kHz, mono
+    WAVEFORMATEX wfx = { 0 };
+    wfx.wFormatTag = WAVE_FORMAT_PCM;
+    wfx.nChannels = 1;
+    wfx.nSamplesPerSec = 44100;
+    wfx.wBitsPerSample = 16;
+    wfx.nBlockAlign = (wfx.nChannels * wfx.wBitsPerSample) / 8;
+    wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
+
+    // Buffer 5s
+    DSCBUFFERDESC dscbd = { 0 };
+    dscbd.dwSize = sizeof(DSCBUFFERDESC);
+    dscbd.dwFlags = 0;
+    dscbd.dwBufferBytes = wfx.nAvgBytesPerSec * 5;
+    dscbd.lpwfxFormat = &wfx;
+
+    if (FAILED(pCapture->CreateCaptureBuffer(&dscbd, &pCaptureBuffer, NULL))) {
+        std::cout << "Failed to create capture buffer\n";
+        return;
+    }
+
+    pCaptureBuffer->Start(0);
+    std::cout << "Recording MIC 5 seconds...\n";
+    Sleep(5000);
+    pCaptureBuffer->Stop();
+
+    void* p1; DWORD b1;
+    void* p2; DWORD b2;
+    if (SUCCEEDED(pCaptureBuffer->Lock(0, dscbd.dwBufferBytes, &p1, &b1, &p2, &b2, DSBLOCK_ENTIREBUFFER))) {
+        std::ofstream out("mic_record.wav", std::ios::binary);
+        WriteWavHeader(out, wfx.nSamplesPerSec, wfx.nChannels, wfx.wBitsPerSample, b1 + b2);
+        out.write((char*)p1, b1);
+        if (p2 && b2 > 0) out.write((char*)p2, b2);
+        out.close();
+        pCaptureBuffer->Unlock(p1, b1, p2, b2);
+        std::cout << "Saved mic_record.wav\n";
+    }
+
+    pCaptureBuffer->Release();
+    pCapture->Release();
+}
+
+// ---------------- LOOPBACK (WASAPI) ----------------
+void RecordLoopback() {
+    IMMDeviceEnumerator* pEnum = nullptr;
+    IMMDevice* pDevice = nullptr;
+    IAudioClient* pAudioClient = nullptr;
+    IAudioCaptureClient* pCaptureClient = nullptr;
+
+    CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL,
+        __uuidof(IMMDeviceEnumerator), (void**)&pEnum);
+
+    pEnum->GetDefaultAudioEndpoint(eRender, eConsole, &pDevice); // Loopback = render
+    pDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void**)&pAudioClient);
+
+    WAVEFORMATEX* pwfx = nullptr;
+    pAudioClient->GetMixFormat(&pwfx);
+
+    // ép về PCM 16-bit
+    WAVEFORMATEX wfx = {};
+    wfx.wFormatTag = WAVE_FORMAT_PCM;
+    wfx.nChannels = pwfx->nChannels;
+    wfx.nSamplesPerSec = pwfx->nSamplesPerSec;
+    wfx.wBitsPerSample = 16;
+    wfx.nBlockAlign = (wfx.nChannels * wfx.wBitsPerSample) / 8;
+    wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
+
+    REFERENCE_TIME hnsDuration = 10000000; // 1s
+    pAudioClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_LOOPBACK,
+        hnsDuration, 0, &wfx, NULL);
+
+    pAudioClient->GetService(__uuidof(IAudioCaptureClient), (void**)&pCaptureClient);
+
+    pAudioClient->Start();
+    std::cout << "Recording LOOPBACK 5 seconds...\n";
+
+    std::vector<BYTE> audioData;
+    DWORD flags;
+    UINT32 packetLength = 0;
+    ULONGLONG endTime = GetTickCount64() + 5000;
+
+    while (GetTickCount64() < endTime) {
+        pCaptureClient->GetNextPacketSize(&packetLength);
+        while (packetLength != 0) {
+            BYTE* pData;
+            UINT32 numFrames;
+            pCaptureClient->GetBuffer(&pData, &numFrames, &flags, NULL, NULL);
+            int bufferSize = numFrames * wfx.nBlockAlign;
+            if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+                std::vector<BYTE> silence(bufferSize, 0);
+                audioData.insert(audioData.end(), silence.begin(), silence.end());
+            }
+            else {
+                audioData.insert(audioData.end(), pData, pData + bufferSize);
+            }
+            pCaptureClient->ReleaseBuffer(numFrames);
+            pCaptureClient->GetNextPacketSize(&packetLength);
+        }
+        Sleep(10);
+    }
+
+    pAudioClient->Stop();
+
+    std::ofstream out("loopback_record.wav", std::ios::binary);
+    WriteWavHeader(out, wfx.nSamplesPerSec, wfx.nChannels,
+        wfx.wBitsPerSample, (int)audioData.size());
+    out.write((char*)audioData.data(), audioData.size());
+    out.close();
+    std::cout << "Saved loopback_record.wav\n";
+
+    CoTaskMemFree(pwfx);
+    pCaptureClient->Release();
+    pAudioClient->Release();
+    pDevice->Release();
+    pEnum->Release();
+}
+
+int main(int argc, char* argv[]) {
+    CoInitialize(NULL);
+
+    if (argc > 1 && std::string(argv[1]) == "loopback") {
+        RecordLoopback();
+    }
+    else {
+        RecordMic();
+    }
+
+    CoUninitialize();
+    return 0;
+}
