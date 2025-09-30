@@ -1,0 +1,350 @@
+#include <pulse/pulseaudio.h>
+#include <pulse/error.h>
+
+#include <iostream>
+#include <string>
+#include <vector>
+#include <atomic>
+#include <cstring>
+
+// Device information struct trả về
+struct DeviceInfo {
+    uint32_t index;
+    std::string name;         // eg. "alsa_output...."
+    std::string description;  // human description if available
+    bool is_sink;             // true = sink (output), false = source (input/monitor)
+    std::string driver;       // module/driver string if present
+    std::string sample_format; // e.g. s16le
+    int channels;
+    int rate;                 // sample rate (Hz)
+    std::string state;        // RUNNING / IDLE / SUSPENDED / UNKNOWN
+};
+
+// helper: map pa_sample_format_t -> string
+static std::string sample_format_to_string(pa_sample_format_t f) {
+    switch (f) {
+        case PA_SAMPLE_U8: return "u8";
+        case PA_SAMPLE_ALAW: return "ALAW";
+        case PA_SAMPLE_ULAW: return "ULAW";
+        case PA_SAMPLE_S16LE: return "s16le";
+        case PA_SAMPLE_S16BE: return "s16be";
+        case PA_SAMPLE_FLOAT32LE: return "float32le";
+        case PA_SAMPLE_FLOAT32BE: return "float32be";
+        case PA_SAMPLE_S32LE: return "s32le";
+        case PA_SAMPLE_S32BE: return "s32be";
+        case PA_SAMPLE_S24LE: return "s24le";
+        case PA_SAMPLE_S24BE: return "s24be";
+        case PA_SAMPLE_S24_32LE: return "s24_32le";
+        case PA_SAMPLE_S24_32BE: return "s24_32be";
+        default: return "unknown";
+    }
+}
+
+// helper: sink/source state -> string
+static std::string sink_state_to_string(pa_sink_state_t s) {
+    switch (s) {
+        case PA_SINK_RUNNING: return "RUNNING";
+        case PA_SINK_IDLE:    return "IDLE";
+        case PA_SINK_SUSPENDED: return "SUSPENDED";
+        default: return "UNKNOWN";
+    }
+}
+
+static std::string source_state_to_string(pa_source_state_t s) {
+    switch (s) {
+        case PA_SOURCE_RUNNING: return "RUNNING";
+        case PA_SOURCE_IDLE:    return "IDLE";
+        case PA_SOURCE_SUSPENDED: return "SUSPENDED";
+        default: return "UNKNOWN";
+    }
+}
+
+// structure truyền dữ liệu vào callback
+struct CallbackData {
+    pa_threaded_mainloop *mainloop;
+    std::vector<DeviceInfo> *out;
+    std::atomic<bool> finished;
+};
+
+// sink info callback
+static void sink_info_cb(pa_context *c, const pa_sink_info *i, int eol, void *userdata) {
+    CallbackData *cb = static_cast<CallbackData*>(userdata);
+    if (eol) {
+        // end of list
+        cb->finished.store(true);
+        pa_threaded_mainloop_signal(cb->mainloop, 0);
+        return;
+    }
+    if (!i) return;
+
+    DeviceInfo d;
+    d.index = i->index;
+    d.name = i->name ? i->name : "";
+    d.description = i->description ? i->description : "";
+    d.is_sink = true;
+    d.driver = i->driver ? i->driver : "";
+    d.sample_format = sample_format_to_string(i->sample_spec.format);
+    d.channels = i->sample_spec.channels;
+    d.rate = i->sample_spec.rate;
+    d.state = sink_state_to_string(i->state);
+
+    cb->out->push_back(std::move(d));
+}
+
+// source info callback
+static void source_info_cb(pa_context *c, const pa_source_info *i, int eol, void *userdata) {
+    CallbackData *cb = static_cast<CallbackData*>(userdata);
+    if (eol) {
+        cb->finished.store(true);
+        pa_threaded_mainloop_signal(cb->mainloop, 0);
+        return;
+    }
+    if (!i) return;
+
+    DeviceInfo d;
+    d.index = i->index;
+    d.name = i->name ? i->name : "";
+    d.description = i->description ? i->description : "";
+    d.is_sink = false;
+    d.driver = i->driver ? i->driver : "";
+    d.sample_format = sample_format_to_string(i->sample_spec.format);
+    d.channels = i->sample_spec.channels;
+    d.rate = i->sample_spec.rate;
+    d.state = source_state_to_string(i->state);
+
+    cb->out->push_back(std::move(d));
+}
+
+// Wait until context ready (synchronous helper)
+static bool wait_for_context_ready(pa_threaded_mainloop *m, pa_context *ctx) {
+    // wait until context becomes ready or failed
+    for (;;) {
+        pa_threaded_mainloop_wait(m);
+        pa_context_state_t s = pa_context_get_state(ctx);
+        if (s == PA_CONTEXT_READY) return true;
+        if (s == PA_CONTEXT_FAILED || s == PA_CONTEXT_TERMINATED) return false;
+    }
+}
+
+// Main function requested: trả về vector DeviceInfo (sinks + sources)
+std::vector<DeviceInfo> list_pulse_devices() {
+    std::vector<DeviceInfo> devices;
+
+    pa_threaded_mainloop *m = pa_threaded_mainloop_new();
+    if (!m) {
+        std::cerr << "Failed to create threaded mainloop\n";
+        return devices;
+    }
+
+    pa_mainloop_api *mainloop_api = pa_threaded_mainloop_get_api(m);
+    pa_context *ctx = pa_context_new(mainloop_api, "list_pulse_devices_cpp");
+    if (!ctx) {
+        std::cerr << "Failed to create context\n";
+        pa_threaded_mainloop_free(m);
+        return devices;
+    }
+
+    CallbackData cbdata;
+    cbdata.mainloop = m;
+    cbdata.out = &devices;
+    cbdata.finished.store(false);
+
+    pa_threaded_mainloop_lock(m);
+    if (pa_threaded_mainloop_start(m) < 0) {
+        std::cerr << "Failed to start mainloop\n";
+        pa_threaded_mainloop_unlock(m);
+        pa_context_unref(ctx);
+        pa_threaded_mainloop_free(m);
+        return devices;
+    }
+
+    if (pa_context_connect(ctx, nullptr, PA_CONTEXT_NOFLAGS, nullptr) < 0) {
+        std::cerr << "pa_context_connect failed: " << pa_strerror(pa_context_errno(ctx)) << "\n";
+        pa_threaded_mainloop_unlock(m);
+        pa_context_unref(ctx);
+        pa_threaded_mainloop_stop(m);
+        pa_threaded_mainloop_free(m);
+        return devices;
+    }
+
+    // wait for ready
+    for (;;) {
+        pa_context_state_t state = pa_context_get_state(ctx);
+        if (state == PA_CONTEXT_READY) break;
+        if (state == PA_CONTEXT_FAILED || state == PA_CONTEXT_TERMINATED) {
+            std::cerr << "Context failed/terminated: " << pa_strerror(pa_context_errno(ctx)) << "\n";
+            pa_threaded_mainloop_unlock(m);
+            pa_context_unref(ctx);
+            pa_threaded_mainloop_stop(m);
+            pa_threaded_mainloop_free(m);
+            return devices;
+        }
+        pa_threaded_mainloop_wait(m);
+    }
+
+    // --- get sinks ---
+    cbdata.finished.store(false);
+    pa_operation *op = pa_context_get_sink_info_list(ctx, sink_info_cb, &cbdata);
+    if (!op) {
+        std::cerr << "Failed to request sink info\n";
+    } else {
+        // wait until callback signals finished
+        while (!cbdata.finished.load()) {
+            pa_threaded_mainloop_wait(m);
+        }
+        pa_operation_unref(op);
+    }
+
+    // --- get sources ---
+    cbdata.finished.store(false);
+    pa_operation *op2 = pa_context_get_source_info_list(ctx, source_info_cb, &cbdata);
+    if (!op2) {
+        std::cerr << "Failed to request source info\n";
+    } else {
+        while (!cbdata.finished.load()) {
+            pa_threaded_mainloop_wait(m);
+        }
+        pa_operation_unref(op2);
+    }
+
+    // cleanup
+    pa_context_disconnect(ctx);
+    pa_context_unref(ctx);
+    pa_threaded_mainloop_unlock(m);
+    pa_threaded_mainloop_stop(m);
+    pa_threaded_mainloop_free(m);
+
+    return devices;
+}
+
+// demo main: in ra định dạng giống pactl short
+int main() {
+    auto devs = list_pulse_devices();
+    for (const auto &d : devs) {
+        // print in format: index \t name \t backend? \t sample_format channels rate \t STATE
+        std::cout << d.index << "\t" << d.name << "\t"
+                  << (d.is_sink ? "Sink" : "Source") << "\t"
+                  << d.sample_format << " " << d.channels << "ch " << d.rate << "Hz\t"
+                  << d.state;
+        if (!d.description.empty()) std::cout << "\t# " << d.description;
+        std::cout << "\n";
+    }
+    return 0;
+}
+
+#include <pulse/pulseaudio.h>
+#include <iostream>
+#include <vector>
+#include <string>
+
+struct DeviceInfo {
+    uint32_t index;
+    std::string name;
+    std::string description;
+    bool is_sink;
+    std::string sample_format;
+    int channels;
+    int rate;
+    std::string state;
+};
+
+static std::string sample_format_to_string(pa_sample_format_t f) {
+    switch (f) {
+        case PA_SAMPLE_S16LE: return "s16le";
+        case PA_SAMPLE_S24LE: return "s24le";
+        case PA_SAMPLE_FLOAT32LE: return "float32le";
+        default: return "other";
+    }
+}
+
+static std::string sink_state_to_string(pa_sink_state_t s) {
+    switch (s) {
+        case PA_SINK_RUNNING: return "RUNNING";
+        case PA_SINK_IDLE: return "IDLE";
+        case PA_SINK_SUSPENDED: return "SUSPENDED";
+        default: return "UNKNOWN";
+    }
+}
+
+static std::string source_state_to_string(pa_source_state_t s) {
+    switch (s) {
+        case PA_SOURCE_RUNNING: return "RUNNING";
+        case PA_SOURCE_IDLE: return "IDLE";
+        case PA_SOURCE_SUSPENDED: return "SUSPENDED";
+        default: return "UNKNOWN";
+    }
+}
+
+std::vector<DeviceInfo> devices;
+
+static void sink_cb(pa_context*, const pa_sink_info *i, int eol, void*) {
+    if (eol || !i) return;
+    DeviceInfo d;
+    d.index = i->index;
+    d.name = i->name;
+    d.description = i->description;
+    d.is_sink = true;
+    d.sample_format = sample_format_to_string(i->sample_spec.format);
+    d.channels = i->sample_spec.channels;
+    d.rate = i->sample_spec.rate;
+    d.state = sink_state_to_string(i->state);
+    devices.push_back(d);
+}
+
+static void source_cb(pa_context*, const pa_source_info *i, int eol, void*) {
+    if (eol || !i) return;
+    DeviceInfo d;
+    d.index = i->index;
+    d.name = i->name;
+    d.description = i->description;
+    d.is_sink = false;
+    d.sample_format = sample_format_to_string(i->sample_spec.format);
+    d.channels = i->sample_spec.channels;
+    d.rate = i->sample_spec.rate;
+    d.state = source_state_to_string(i->state);
+    devices.push_back(d);
+}
+
+int main() {
+    pa_mainloop *ml = pa_mainloop_new();
+    pa_mainloop_api *api = pa_mainloop_get_api(ml);
+    pa_context *ctx = pa_context_new(api, "cpp-pulse-test");
+
+    pa_context_connect(ctx, nullptr, PA_CONTEXT_NOFLAGS, nullptr);
+
+    // loop until context ready
+    while (true) {
+        pa_context_state_t st = pa_context_get_state(ctx);
+        if (st == PA_CONTEXT_READY) break;
+        if (st == PA_CONTEXT_FAILED || st == PA_CONTEXT_TERMINATED) {
+            std::cerr << "Failed to connect context\n";
+            return 1;
+        }
+        pa_mainloop_iterate(ml, 1, nullptr);
+    }
+
+    pa_operation *op1 = pa_context_get_sink_info_list(ctx, sink_cb, nullptr);
+    while (pa_operation_get_state(op1) == PA_OPERATION_RUNNING)
+        pa_mainloop_iterate(ml, 1, nullptr);
+    pa_operation_unref(op1);
+
+    pa_operation *op2 = pa_context_get_source_info_list(ctx, source_cb, nullptr);
+    while (pa_operation_get_state(op2) == PA_OPERATION_RUNNING)
+        pa_mainloop_iterate(ml, 1, nullptr);
+    pa_operation_unref(op2);
+
+    // in kết quả
+    for (auto &d : devices) {
+        std::cout << d.index << "\t" << d.name << "\t"
+                  << (d.is_sink ? "Sink" : "Source") << "\t"
+                  << d.sample_format << " " << d.channels << "ch "
+                  << d.rate << "Hz\t" << d.state
+                  << "\t# " << d.description << "\n";
+    }
+
+    pa_context_disconnect(ctx);
+    pa_context_unref(ctx);
+    pa_mainloop_free(ml);
+    return 0;
+}
+
