@@ -1,0 +1,870 @@
+// record_pid_with_loopback.cpp
+// Create null sink, create loopback from null_sink.monitor -> original_sink,
+// move sink-input (PID) to null sink, record monitor -> WAV,
+// on Ctrl+C restore and unload modules.
+// Compile: g++ -std=c++17 record_pid_with_loopback.cpp -o record_pid_with_loopback $(pkg-config --cflags --libs libpulse)
+
+#include <pulse/pulseaudio.h>
+#include <signal.h>
+#include <atomic>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <cstring>
+#include <cstdint>
+
+static std::atomic<bool> g_running{true};
+static pa_mainloop* g_ml = nullptr;
+static pa_context* g_ctx = nullptr;
+static pa_stream* g_stream = nullptr;
+static std::ofstream g_outfile;
+
+// helpers for little-endian writing
+static void write_le_u32(std::ofstream &f, uint32_t v) {
+    uint8_t b[4] = { uint8_t(v & 0xff), uint8_t((v>>8)&0xff), uint8_t((v>>16)&0xff), uint8_t((v>>24)&0xff) };
+    f.write(reinterpret_cast<char*>(b), 4);
+}
+static void write_le_u16(std::ofstream &f, uint16_t v) {
+    uint8_t b[2] = { uint8_t(v & 0xff), uint8_t((v>>8)&0xff) };
+    f.write(reinterpret_cast<char*>(b), 2);
+}
+
+void sigint_handler(int) {
+    // only flip flag; don't call libpulse APIs here
+    g_running.store(false);
+}
+
+// Data structures
+struct FoundSinkInput {
+    bool found = false;
+    uint32_t sink_input_index = 0;
+    uint32_t original_sink_index = 0;
+    pa_sample_spec sample_spec{};
+};
+
+struct Finder {
+    std::string target_pid;
+    FoundSinkInput *result;
+};
+
+struct SinkNameData {
+    uint32_t idx;
+    std::string name;
+    pa_sample_spec sample_spec;
+};
+
+// callbacks
+static void sink_input_cb(pa_context* c, const pa_sink_input_info* i, int eol, void* userdata) {
+    if (eol) return;
+    if (!i) return;
+    Finder* F = static_cast<Finder*>(userdata);
+    if (!i->proplist) return;
+    const char* pid = pa_proplist_gets(i->proplist, "application.process.id");
+    if (pid && F->target_pid == pid && !F->result->found) {
+        F->result->found = true;
+        F->result->sink_input_index = i->index;
+        F->result->original_sink_index = i->sink;
+        F->result->sample_spec = i->sample_spec;
+    }
+}
+
+static void sink_info_cb(pa_context* c, const pa_sink_info* i, int eol, void* userdata) {
+    if (eol) return;
+    if (!i) return;
+    SinkNameData* sd = static_cast<SinkNameData*>(userdata);
+    if (i->index == sd->idx) {
+        if (i->name) sd->name = i->name;
+        sd->sample_spec = i->sample_spec;
+    }
+}
+
+static void module_load_cb(pa_context* c, uint32_t idx, void* userdata) {
+    uint32_t* out = static_cast<uint32_t*>(userdata);
+    if (out) *out = idx;
+}
+
+static void success_cb(pa_context* c, int success, void* userdata) {
+    int* p = static_cast<int*>(userdata);
+    if (p) *p = success;
+}
+
+static void stream_read_cb(pa_stream* s, size_t length, void* userdata) {
+    const void* data;
+    if (pa_stream_peek(s, &data, &length) < 0) return;
+    if (length > 0 && data && g_outfile.is_open()) {
+        g_outfile.write(reinterpret_cast<const char*>(data), length);
+    }
+    pa_stream_drop(s);
+}
+
+// WAV helpers
+static bool write_wav_header_placeholder(std::ofstream &f, const pa_sample_spec &spec) {
+    if (!f.is_open()) return false;
+    uint16_t audio_format = 3; // default IEEE float
+    uint16_t bits_per_sample = 32;
+    if (spec.format == PA_SAMPLE_S16LE || spec.format == PA_SAMPLE_S16BE) {
+        audio_format = 1; bits_per_sample = 16;
+    } else if (spec.format == PA_SAMPLE_FLOAT32LE || spec.format == PA_SAMPLE_FLOAT32BE) {
+        audio_format = 3; bits_per_sample = 32;
+    } else if (spec.format == PA_SAMPLE_S32LE || spec.format == PA_SAMPLE_S32BE) {
+        audio_format = 1; bits_per_sample = 32;
+    } else {
+        audio_format = 3; bits_per_sample = 32;
+    }
+    uint16_t num_channels = spec.channels ? spec.channels : 2;
+    uint32_t sample_rate = spec.rate ? spec.rate : 48000;
+    uint16_t block_align = (num_channels * bits_per_sample) / 8;
+    uint32_t byte_rate = sample_rate * block_align;
+
+    f.seekp(0);
+    f.write("RIFF", 4);
+    write_le_u32(f, 0); // placeholder file size - 8
+    f.write("WAVE", 4);
+
+    f.write("fmt ", 4);
+    write_le_u32(f, 16);
+    write_le_u16(f, audio_format);
+    write_le_u16(f, num_channels);
+    write_le_u32(f, sample_rate);
+    write_le_u32(f, byte_rate);
+    write_le_u16(f, block_align);
+    write_le_u16(f, bits_per_sample);
+
+    f.write("data", 4);
+    write_le_u32(f, 0); // placeholder data size
+    return true;
+}
+
+static void finalize_wav(std::ofstream &f) {
+    if (!f.is_open()) return;
+    std::streampos file_end = f.tellp();
+    uint32_t file_size_minus8 = static_cast<uint32_t>(file_end) - 8;
+    uint32_t data_chunk_size = static_cast<uint32_t>(file_end) - 44;
+    f.seekp(4);
+    write_le_u32(f, file_size_minus8);
+    f.seekp(40);
+    write_le_u32(f, data_chunk_size);
+    f.flush();
+}
+
+int main(int argc, char** argv) {
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0] << " <PID> <out.wav>\n";
+        return 1;
+    }
+    std::string pid = argv[1];
+    std::string outfn = argv[2];
+
+    signal(SIGINT, sigint_handler);
+
+    g_ml = pa_mainloop_new();
+    pa_mainloop_api* api = pa_mainloop_get_api(g_ml);
+    g_ctx = pa_context_new(api, "record_pid_with_loopback");
+
+    if (!g_ml || !g_ctx) {
+        std::cerr << "Failed to create mainloop/context\n";
+        return 2;
+    }
+
+    if (pa_context_connect(g_ctx, nullptr, PA_CONTEXT_NOFLAGS, nullptr) < 0) {
+        std::cerr << "pa_context_connect failed: " << pa_strerror(pa_context_errno(g_ctx)) << "\n";
+        return 3;
+    }
+
+    // wait for context ready
+    for (;;) {
+        pa_context_state_t st = pa_context_get_state(g_ctx);
+        if (st == PA_CONTEXT_READY) break;
+        if (st == PA_CONTEXT_FAILED || st == PA_CONTEXT_TERMINATED) {
+            std::cerr << "Failed to connect to pulse: " << pa_strerror(pa_context_errno(g_ctx)) << "\n";
+            return 4;
+        }
+        int ret;
+        if (pa_mainloop_iterate(g_ml, 1, &ret) < 0) {
+            std::cerr << "pa_mainloop_iterate error\n";
+            return 5;
+        }
+    }
+
+    // 1) find sink-input by PID
+    FoundSinkInput fd;
+    Finder finder;
+    finder.target_pid = pid;
+    finder.result = &fd;
+
+    pa_operation* op = pa_context_get_sink_input_info_list(g_ctx, sink_input_cb, &finder);
+    while (pa_operation_get_state(op) == PA_OPERATION_RUNNING) {
+        int ret;
+        pa_mainloop_iterate(g_ml, 1, &ret);
+    }
+    pa_operation_unref(op);
+
+    if (!fd.found) {
+        std::cerr << "No sink-input found for PID " << pid << "\n";
+        pa_context_disconnect(g_ctx);
+        pa_context_unref(g_ctx);
+        pa_mainloop_free(g_ml);
+        return 6;
+    }
+    std::cerr << "Found sink-input index: " << fd.sink_input_index
+              << " original sink index: " << fd.original_sink_index << "\n";
+
+    // 2) get original sink name (so we can loopback to it)
+    SinkNameData orig;
+    orig.idx = fd.original_sink_index;
+    orig.name.clear();
+    pa_operation* op_orig = pa_context_get_sink_info_by_index(g_ctx, orig.idx, [](pa_context*, const pa_sink_info* i, int eol, void* userdata){
+        if (eol) return;
+        if (!i) return;
+        SinkNameData* s = static_cast<SinkNameData*>(userdata);
+        s->idx = i->index;
+        if (i->name) s->name = i->name;
+        s->sample_spec = i->sample_spec;
+    }, &orig);
+    while (pa_operation_get_state(op_orig) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+    pa_operation_unref(op_orig);
+
+    if (orig.name.empty()) {
+        std::cerr << "Failed to get original sink name (index=" << orig.idx << ")\n";
+        pa_context_disconnect(g_ctx);
+        pa_context_unref(g_ctx);
+        pa_mainloop_free(g_ml);
+        return 7;
+    }
+    std::cerr << "Original sink name: " << orig.name << "\n";
+
+    // 3) create null sink
+    std::string null_sink_name = "isolate_sink_pid_" + pid;
+    uint32_t module_null_idx = 0;
+    std::string null_args = "sink_name=" + null_sink_name + " sink_properties=device.description=\"IsolatedSink-" + pid + "\"";
+    pa_operation* op_mod = pa_context_load_module(g_ctx, "module-null-sink", null_args.c_str(), module_load_cb, &module_null_idx);
+    while (pa_operation_get_state(op_mod) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+    pa_operation_unref(op_mod);
+    if (module_null_idx == 0) {
+        std::cerr << "Failed to load module-null-sink\n";
+    } else {
+        std::cerr << "Loaded module-null-sink module_index=" << module_null_idx << "\n";
+    }
+
+    // 4) get null sink info to find its real name/index
+    SinkNameData sd;
+    sd.idx = PA_INVALID_INDEX;
+    sd.name.clear();
+    pa_operation* op_sinkinfo = pa_context_get_sink_info_by_name(g_ctx, null_sink_name.c_str(), [](pa_context*, const pa_sink_info* i, int eol, void* userdata){
+        if (eol) return;
+        if (!i) return;
+        SinkNameData* s = static_cast<SinkNameData*>(userdata);
+        s->idx = i->index;
+        if (i->name) s->name = i->name;
+        s->sample_spec = i->sample_spec;
+    }, &sd);
+    while (pa_operation_get_state(op_sinkinfo) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+    pa_operation_unref(op_sinkinfo);
+
+    if (sd.name.empty() || sd.idx == PA_INVALID_INDEX) {
+        std::cerr << "Failed to find newly created null sink info\n";
+        if (module_null_idx) {
+            pa_operation* op_unload = pa_context_unload_module(g_ctx, module_null_idx, nullptr, nullptr);
+            while (pa_operation_get_state(op_unload) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+            pa_operation_unref(op_unload);
+        }
+        pa_context_disconnect(g_ctx);
+        pa_context_unref(g_ctx);
+        pa_mainloop_free(g_ml);
+        return 8;
+    }
+    std::cerr << "Created null sink: " << sd.name << " index=" << sd.idx << "\n";
+
+    // 5) create loopback from null_monitor -> original sink (so user still hears)
+    uint32_t module_loop_idx = 0;
+    // latency_msec param can be adjusted; smaller = lower latency (but more CPU), default is fine
+    std::string loop_args = "source=" + sd.name + ".monitor" + " sink=" + orig.name + " latency_msec=10";
+    pa_operation* op_loop = pa_context_load_module(g_ctx, "module-loopback", loop_args.c_str(), module_load_cb, &module_loop_idx);
+    while (pa_operation_get_state(op_loop) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+    pa_operation_unref(op_loop);
+    if (module_loop_idx == 0) {
+        std::cerr << "Failed to load module-loopback\n";
+        // we can continue but user won't hear; you might want to abort and cleanup
+    } else {
+        std::cerr << "Loaded module-loopback module_index=" << module_loop_idx << " (forwarding " << sd.name << ".monitor -> " << orig.name << ")\n";
+    }
+
+    // 6) move sink-input to null sink
+    int move_success = 0;
+    pa_operation* op_move = pa_context_move_sink_input_by_index(g_ctx, fd.sink_input_index, sd.idx, success_cb, &move_success);
+    while (pa_operation_get_state(op_move) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+    pa_operation_unref(op_move);
+    if (!move_success) {
+        std::cerr << "Failed to move sink-input to null sink\n";
+        // cleanup
+        if (module_loop_idx) {
+            pa_operation* op_unload = pa_context_unload_module(g_ctx, module_loop_idx, nullptr, nullptr);
+            while (pa_operation_get_state(op_unload) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+            pa_operation_unref(op_unload);
+        }
+        if (module_null_idx) {
+            pa_operation* op_unload2 = pa_context_unload_module(g_ctx, module_null_idx, nullptr, nullptr);
+            while (pa_operation_get_state(op_unload2) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+            pa_operation_unref(op_unload2);
+        }
+        pa_context_disconnect(g_ctx);
+        pa_context_unref(g_ctx);
+        pa_mainloop_free(g_ml);
+        return 9;
+    }
+    std::cerr << "Moved sink-input " << fd.sink_input_index << " to " << sd.name << "\n";
+
+    // 7) open outfile and write wav header placeholder
+    pa_sample_spec ss = sd.sample_spec;
+    if (ss.rate == 0) {
+        ss.format = PA_SAMPLE_FLOAT32LE;
+        ss.rate = 48000;
+        ss.channels = 2;
+    }
+
+    g_outfile.open(outfn, std::ios::binary);
+    if (!g_outfile.is_open()) {
+        std::cerr << "Failed to open output file\n";
+        // cleanup: attempt move back and unload
+        int mvback = 0;
+        pa_operation* op_back = pa_context_move_sink_input_by_index(g_ctx, fd.sink_input_index, fd.original_sink_index, success_cb, &mvback);
+        while (pa_operation_get_state(op_back) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+        pa_operation_unref(op_back);
+        if (module_loop_idx) {
+            pa_operation* op_unload = pa_context_unload_module(g_ctx, module_loop_idx, nullptr, nullptr);
+            while (pa_operation_get_state(op_unload) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+            pa_operation_unref(op_unload);
+        }
+        if (module_null_idx) {
+            pa_operation* op_unload2 = pa_context_unload_module(g_ctx, module_null_idx, nullptr, nullptr);
+            while (pa_operation_get_state(op_unload2) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+            pa_operation_unref(op_unload2);
+        }
+        pa_context_disconnect(g_ctx);
+        pa_context_unref(g_ctx);
+        pa_mainloop_free(g_ml);
+        return 10;
+    }
+
+    write_wav_header_placeholder(g_outfile, ss);
+
+    // 8) create stream and record from null_sink.monitor
+    std::string monitor = sd.name + ".monitor";
+    g_stream = pa_stream_new(g_ctx, "isolated_record_stream", &ss, nullptr);
+    if (!g_stream) {
+        std::cerr << "pa_stream_new failed\n";
+        g_outfile.close();
+        // cleanup: move back and unload
+        int mvback = 0;
+        pa_operation* op_back = pa_context_move_sink_input_by_index(g_ctx, fd.sink_input_index, fd.original_sink_index, success_cb, &mvback);
+        while (pa_operation_get_state(op_back) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+        pa_operation_unref(op_back);
+        if (module_loop_idx) {
+            pa_operation* op_unload = pa_context_unload_module(g_ctx, module_loop_idx, nullptr, nullptr);
+            while (pa_operation_get_state(op_unload) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+            pa_operation_unref(op_unload);
+        }
+        if (module_null_idx) {
+            pa_operation* op_unload2 = pa_context_unload_module(g_ctx, module_null_idx, nullptr, nullptr);
+            while (pa_operation_get_state(op_unload2) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+            pa_operation_unref(op_unload2);
+        }
+        pa_context_disconnect(g_ctx);
+        pa_context_unref(g_ctx);
+        pa_mainloop_free(g_ml);
+        return 11;
+    }
+
+    pa_stream_set_read_callback(g_stream, stream_read_cb, nullptr);
+    pa_buffer_attr attr;
+    attr.maxlength = (uint32_t)-1;
+    attr.tlength = (uint32_t)-1;
+    attr.prebuf = (uint32_t)-1;
+    attr.minreq = (uint32_t)-1;
+    attr.fragsize = 4096;
+
+    if (pa_stream_connect_record(g_stream, monitor.c_str(), &attr, PA_STREAM_ADJUST_LATENCY) < 0) {
+        std::cerr << "pa_stream_connect_record failed: " << pa_strerror(pa_context_errno(g_ctx)) << "\n";
+        pa_stream_unref(g_stream);
+        g_outfile.close();
+        // cleanup: move back, unload modules
+        int mvback = 0;
+        pa_operation* op_back = pa_context_move_sink_input_by_index(g_ctx, fd.sink_input_index, fd.original_sink_index, success_cb, &mvback);
+        while (pa_operation_get_state(op_back) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+        pa_operation_unref(op_back);
+        if (module_loop_idx) {
+            pa_operation* op_unload = pa_context_unload_module(g_ctx, module_loop_idx, nullptr, nullptr);
+            while (pa_operation_get_state(op_unload) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+            pa_operation_unref(op_unload);
+        }
+        if (module_null_idx) {
+            pa_operation* op_unload2 = pa_context_unload_module(g_ctx, module_null_idx, nullptr, nullptr);
+            while (pa_operation_get_state(op_unload2) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+            pa_operation_unref(op_unload2);
+        }
+        pa_context_disconnect(g_ctx);
+        pa_context_unref(g_ctx);
+        pa_mainloop_free(g_ml);
+        return 12;
+    }
+
+    std::cerr << "Recording isolated stream to " << outfn << " (monitor: " << monitor << ")\n";
+    std::cerr << "Press Ctrl+C to stop and restore original routing.\n";
+
+    // main loop
+    while (g_running.load()) {
+        int ret;
+        if (pa_mainloop_iterate(g_ml, 1, &ret) < 0) {
+            std::cerr << "pa_mainloop_iterate error, breaking\n";
+            break;
+        }
+    }
+
+    // stop recording and cleanup
+    if (g_stream) {
+        pa_stream_disconnect(g_stream);
+        pa_stream_unref(g_stream);
+        g_stream = nullptr;
+    }
+
+    finalize_wav(g_outfile);
+    g_outfile.close();
+
+    // move sink-input back
+    int mvback = 0;
+    pa_operation* op_back = pa_context_move_sink_input_by_index(g_ctx, fd.sink_input_index, fd.original_sink_index, success_cb, &mvback);
+    while (pa_operation_get_state(op_back) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+    pa_operation_unref(op_back);
+    if (mvback) {
+        std::cerr << "Moved sink-input back to original sink index " << fd.original_sink_index << "\n";
+    } else {
+        std::cerr << "Failed to move sink-input back (it might have ended). Manual restore may be needed.\n";
+    }
+
+    // unload loopback module
+    if (module_loop_idx) {
+        pa_operation* op_unload_loop = pa_context_unload_module(g_ctx, module_loop_idx, nullptr, nullptr);
+        while (pa_operation_get_state(op_unload_loop) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+        pa_operation_unref(op_unload_loop);
+        std::cerr << "Unloaded loopback module " << module_loop_idx << "\n";
+    }
+
+    // unload null sink module
+    if (module_null_idx) {
+        pa_operation* op_unload = pa_context_unload_module(g_ctx, module_null_idx, nullptr, nullptr);
+        while (pa_operation_get_state(op_unload) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+        pa_operation_unref(op_unload);
+        std::cerr << "Unloaded null-sink module " << module_null_idx << "\n";
+    }
+
+    pa_context_disconnect(g_ctx);
+    pa_context_unref(g_ctx);
+    pa_mainloop_free(g_ml);
+
+    std::cerr << "Done.\n";
+    return 0;
+}
+
+
+// record_pid_isolated_fixed.cpp
+// Fixed: signal handler is signal-safe (only sets atomic flag).
+// Behavior: create null sink, move sink-input for given PID into it,
+// record from null_sink.monitor -> WAV, on Ctrl+C stop recording, move back, unload module.
+
+#include <pulse/pulseaudio.h>
+#include <signal.h>
+#include <atomic>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <cstring>
+#include <cstdint>
+
+static std::atomic<bool> g_running{true};
+static pa_mainloop* g_ml = nullptr;
+static pa_context* g_ctx = nullptr;
+static pa_stream* g_stream = nullptr;
+static std::ofstream g_outfile;
+
+// write little-endian helpers
+static void write_le_u32(std::ofstream &f, uint32_t v) {
+    uint8_t b[4] = { uint8_t(v & 0xff), uint8_t((v>>8)&0xff), uint8_t((v>>16)&0xff), uint8_t((v>>24)&0xff) };
+    f.write(reinterpret_cast<char*>(b), 4);
+}
+static void write_le_u16(std::ofstream &f, uint16_t v) {
+    uint8_t b[2] = { uint8_t(v & 0xff), uint8_t((v>>8)&0xff) };
+    f.write(reinterpret_cast<char*>(b), 2);
+}
+
+void sigint_handler(int) {
+    // Signal-safe: ONLY set atomic flag. Do NOT call libpulse API here.
+    g_running.store(false);
+}
+
+// Data structs
+struct FoundSinkInput {
+    bool found = false;
+    uint32_t sink_input_index = 0;
+    uint32_t original_sink_index = 0;
+    pa_sample_spec sample_spec{};
+};
+
+struct Finder {
+    std::string target_pid;
+    FoundSinkInput *result;
+};
+
+struct SinkNameData {
+    uint32_t idx;
+    std::string name;
+    pa_sample_spec sample_spec;
+};
+
+// callbacks
+static void sink_input_cb(pa_context* c, const pa_sink_input_info* i, int eol, void* userdata) {
+    if (eol) return;
+    if (!i) return;
+    Finder* F = static_cast<Finder*>(userdata);
+    if (!i->proplist) return;
+    const char* pid = pa_proplist_gets(i->proplist, "application.process.id");
+    if (pid && F->target_pid == pid && !F->result->found) {
+        F->result->found = true;
+        F->result->sink_input_index = i->index;
+        F->result->original_sink_index = i->sink;
+        F->result->sample_spec = i->sample_spec;
+    }
+}
+
+static void sink_info_cb(pa_context* c, const pa_sink_info* i, int eol, void* userdata) {
+    if (eol) return;
+    if (!i) return;
+    SinkNameData* sd = static_cast<SinkNameData*>(userdata);
+    if (i->index == sd->idx) {
+        if (i->name) sd->name = i->name;
+        sd->sample_spec = i->sample_spec;
+    }
+}
+
+static void module_load_cb(pa_context* c, uint32_t idx, void* userdata) {
+    uint32_t* out = static_cast<uint32_t*>(userdata);
+    if (out) *out = idx;
+}
+
+static void success_cb(pa_context* c, int success, void* userdata) {
+    int* p = static_cast<int*>(userdata);
+    if (p) *p = success;
+}
+
+static void stream_read_cb(pa_stream* s, size_t length, void* userdata) {
+    const void* data;
+    if (pa_stream_peek(s, &data, &length) < 0) return;
+    if (length > 0 && data && g_outfile.is_open()) {
+        g_outfile.write(reinterpret_cast<const char*>(data), length);
+    }
+    pa_stream_drop(s);
+}
+
+// WAV helpers
+static bool write_wav_header_placeholder(std::ofstream &f, const pa_sample_spec &spec) {
+    if (!f.is_open()) return false;
+    uint16_t audio_format = 3; // default IEEE float
+    uint16_t bits_per_sample = 32;
+    if (spec.format == PA_SAMPLE_S16LE || spec.format == PA_SAMPLE_S16BE) {
+        audio_format = 1; bits_per_sample = 16;
+    } else if (spec.format == PA_SAMPLE_FLOAT32LE || spec.format == PA_SAMPLE_FLOAT32BE) {
+        audio_format = 3; bits_per_sample = 32;
+    } else if (spec.format == PA_SAMPLE_S32LE || spec.format == PA_SAMPLE_S32BE) {
+        audio_format = 1; bits_per_sample = 32;
+    } else {
+        audio_format = 3; bits_per_sample = 32;
+    }
+    uint16_t num_channels = spec.channels ? spec.channels : 2;
+    uint32_t sample_rate = spec.rate ? spec.rate : 48000;
+    uint16_t block_align = (num_channels * bits_per_sample) / 8;
+    uint32_t byte_rate = sample_rate * block_align;
+
+    f.seekp(0);
+    f.write("RIFF", 4);
+    write_le_u32(f, 0); // placeholder file size - 8
+    f.write("WAVE", 4);
+
+    f.write("fmt ", 4);
+    write_le_u32(f, 16);
+    write_le_u16(f, audio_format);
+    write_le_u16(f, num_channels);
+    write_le_u32(f, sample_rate);
+    write_le_u32(f, byte_rate);
+    write_le_u16(f, block_align);
+    write_le_u16(f, bits_per_sample);
+
+    f.write("data", 4);
+    write_le_u32(f, 0); // placeholder data size
+    return true;
+}
+
+static void finalize_wav(std::ofstream &f) {
+    if (!f.is_open()) return;
+    std::streampos file_end = f.tellp();
+    uint32_t file_size_minus8 = static_cast<uint32_t>(file_end) - 8;
+    uint32_t data_chunk_size = static_cast<uint32_t>(file_end) - 44;
+    f.seekp(4);
+    write_le_u32(f, file_size_minus8);
+    f.seekp(40);
+    write_le_u32(f, data_chunk_size);
+    f.flush();
+}
+
+int main(int argc, char** argv) {
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0] << " <PID> <out.wav>\n";
+        return 1;
+    }
+    std::string pid = argv[1];
+    std::string outfn = argv[2];
+
+    signal(SIGINT, sigint_handler);
+
+    g_ml = pa_mainloop_new();
+    pa_mainloop_api* api = pa_mainloop_get_api(g_ml);
+    g_ctx = pa_context_new(api, "record_pid_isolated_fixed");
+
+    if (!g_ml || !g_ctx) {
+        std::cerr << "Failed to create mainloop/context\n";
+        return 2;
+    }
+
+    if (pa_context_connect(g_ctx, nullptr, PA_CONTEXT_NOFLAGS, nullptr) < 0) {
+        std::cerr << "pa_context_connect failed: " << pa_strerror(pa_context_errno(g_ctx)) << "\n";
+        return 3;
+    }
+
+    // wait for context ready (using iterate)
+    for (;;) {
+        pa_context_state_t st = pa_context_get_state(g_ctx);
+        if (st == PA_CONTEXT_READY) break;
+        if (st == PA_CONTEXT_FAILED || st == PA_CONTEXT_TERMINATED) {
+            std::cerr << "Failed to connect to pulse: " << pa_strerror(pa_context_errno(g_ctx)) << "\n";
+            return 4;
+        }
+        int ret;
+        if (pa_mainloop_iterate(g_ml, 1, &ret) < 0) {
+            std::cerr << "pa_mainloop_iterate error\n";
+            return 5;
+        }
+    }
+
+    // 1) find sink-input by PID
+    FoundSinkInput fd;
+    Finder finder;
+    finder.target_pid = pid;
+    finder.result = &fd;
+
+    pa_operation* op = pa_context_get_sink_input_info_list(g_ctx, sink_input_cb, &finder);
+    while (pa_operation_get_state(op) == PA_OPERATION_RUNNING) {
+        int ret;
+        pa_mainloop_iterate(g_ml, 1, &ret);
+    }
+    pa_operation_unref(op);
+
+    if (!fd.found) {
+        std::cerr << "No sink-input found for PID " << pid << "\n";
+        pa_context_disconnect(g_ctx);
+        pa_context_unref(g_ctx);
+        pa_mainloop_free(g_ml);
+        return 6;
+    }
+    std::cerr << "Found sink-input index: " << fd.sink_input_index
+              << " original sink index: " << fd.original_sink_index << "\n";
+
+    // 2) create null sink
+    std::string null_sink_name = "isolate_sink_pid_" + pid;
+    uint32_t module_index = 0;
+    std::string args = "sink_name=" + null_sink_name + " sink_properties=device.description=\"IsolatedSink-" + pid + "\"";
+    pa_operation* op_mod = pa_context_load_module(g_ctx, "module-null-sink", args.c_str(), module_load_cb, &module_index);
+    while (pa_operation_get_state(op_mod) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+    pa_operation_unref(op_mod);
+    if (module_index == 0) {
+        std::cerr << "Failed to load module-null-sink\n";
+    } else {
+        std::cerr << "Loaded module-null-sink module_index=" << module_index << "\n";
+    }
+
+    // 3) get sink info by name (new null sink)
+    SinkNameData sd;
+    sd.idx = PA_INVALID_INDEX;
+    sd.name.clear();
+    pa_operation* op_sinkinfo = pa_context_get_sink_info_by_name(g_ctx, null_sink_name.c_str(), [](pa_context*, const pa_sink_info* i, int eol, void* userdata){
+        if (eol) return;
+        if (!i) return;
+        SinkNameData* s = static_cast<SinkNameData*>(userdata);
+        s->idx = i->index;
+        if (i->name) s->name = i->name;
+        s->sample_spec = i->sample_spec;
+    }, &sd);
+    while (pa_operation_get_state(op_sinkinfo) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+    pa_operation_unref(op_sinkinfo);
+
+    if (sd.name.empty() || sd.idx == PA_INVALID_INDEX) {
+        std::cerr << "Failed to find newly created null sink info\n";
+        if (module_index) {
+            pa_operation* op_unload = pa_context_unload_module(g_ctx, module_index, nullptr, nullptr);
+            while (pa_operation_get_state(op_unload) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+            pa_operation_unref(op_unload);
+        }
+        pa_context_disconnect(g_ctx);
+        pa_context_unref(g_ctx);
+        pa_mainloop_free(g_ml);
+        return 7;
+    }
+
+    std::cerr << "Created null sink: " << sd.name << " index=" << sd.idx << "\n";
+
+    // 4) move sink-input to null sink
+    int move_success = 0;
+    pa_operation* op_move = pa_context_move_sink_input_by_index(g_ctx, fd.sink_input_index, sd.idx, success_cb, &move_success);
+    while (pa_operation_get_state(op_move) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+    pa_operation_unref(op_move);
+    if (!move_success) {
+        std::cerr << "Failed to move sink-input to null sink\n";
+        // cleanup
+        if (module_index) {
+            pa_operation* op_unload = pa_context_unload_module(g_ctx, module_index, nullptr, nullptr);
+            while (pa_operation_get_state(op_unload) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+            pa_operation_unref(op_unload);
+        }
+        pa_context_disconnect(g_ctx);
+        pa_context_unref(g_ctx);
+        pa_mainloop_free(g_ml);
+        return 8;
+    }
+    std::cerr << "Moved sink-input " << fd.sink_input_index << " to " << sd.name << "\n";
+
+    // 5) open outfile and write wav header placeholder
+    pa_sample_spec ss = sd.sample_spec;
+    if (ss.rate == 0) {
+        ss.format = PA_SAMPLE_FLOAT32LE;
+        ss.rate = 48000;
+        ss.channels = 2;
+    }
+
+    g_outfile.open(outfn, std::ios::binary);
+    if (!g_outfile.is_open()) {
+        std::cerr << "Failed to open output file\n";
+        // try move back and unload
+        int mvback = 0;
+        pa_operation* op_back = pa_context_move_sink_input_by_index(g_ctx, fd.sink_input_index, fd.original_sink_index, success_cb, &mvback);
+        while (pa_operation_get_state(op_back) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+        pa_operation_unref(op_back);
+        if (module_index) {
+            pa_operation* op_unload = pa_context_unload_module(g_ctx, module_index, nullptr, nullptr);
+            while (pa_operation_get_state(op_unload) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+            pa_operation_unref(op_unload);
+        }
+        pa_context_disconnect(g_ctx);
+        pa_context_unref(g_ctx);
+        pa_mainloop_free(g_ml);
+        return 9;
+    }
+
+    write_wav_header_placeholder(g_outfile, ss);
+
+    // 6) create stream and connect record to null_sink.monitor
+    std::string monitor = sd.name + ".monitor";
+    g_stream = pa_stream_new(g_ctx, "isolated_record_stream", &ss, nullptr);
+    if (!g_stream) {
+        std::cerr << "pa_stream_new failed\n";
+        g_outfile.close();
+        // cleanup move back/unload
+        int mvback = 0;
+        pa_operation* op_back = pa_context_move_sink_input_by_index(g_ctx, fd.sink_input_index, fd.original_sink_index, success_cb, &mvback);
+        while (pa_operation_get_state(op_back) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+        pa_operation_unref(op_back);
+        if (module_index) {
+            pa_operation* op_unload = pa_context_unload_module(g_ctx, module_index, nullptr, nullptr);
+            while (pa_operation_get_state(op_unload) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+            pa_operation_unref(op_unload);
+        }
+        pa_context_disconnect(g_ctx);
+        pa_context_unref(g_ctx);
+        pa_mainloop_free(g_ml);
+        return 10;
+    }
+
+    pa_stream_set_read_callback(g_stream, stream_read_cb, nullptr);
+    pa_buffer_attr attr;
+    attr.maxlength = (uint32_t)-1;
+    attr.tlength = (uint32_t)-1;
+    attr.prebuf = (uint32_t)-1;
+    attr.minreq = (uint32_t)-1;
+    attr.fragsize = 4096;
+
+    if (pa_stream_connect_record(g_stream, monitor.c_str(), &attr, PA_STREAM_ADJUST_LATENCY) < 0) {
+        std::cerr << "pa_stream_connect_record failed: " << pa_strerror(pa_context_errno(g_ctx)) << "\n";
+        pa_stream_unref(g_stream);
+        g_outfile.close();
+        // cleanup move back/unload
+        int mvback = 0;
+        pa_operation* op_back = pa_context_move_sink_input_by_index(g_ctx, fd.sink_input_index, fd.original_sink_index, success_cb, &mvback);
+        while (pa_operation_get_state(op_back) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+        pa_operation_unref(op_back);
+        if (module_index) {
+            pa_operation* op_unload = pa_context_unload_module(g_ctx, module_index, nullptr, nullptr);
+            while (pa_operation_get_state(op_unload) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+            pa_operation_unref(op_unload);
+        }
+        pa_context_disconnect(g_ctx);
+        pa_context_unref(g_ctx);
+        pa_mainloop_free(g_ml);
+        return 11;
+    }
+
+    std::cerr << "Recording isolated stream to " << outfn << " (monitor: " << monitor << ")\n";
+    std::cerr << "Press Ctrl+C to stop and restore original routing.\n";
+
+    // main loop: iterate and check flag (signal handler only flips flag)
+    while (g_running.load()) {
+        int ret;
+        if (pa_mainloop_iterate(g_ml, 1, &ret) < 0) {
+            std::cerr << "pa_mainloop_iterate error, breaking\n";
+            break;
+        }
+    }
+
+    // stop recording and cleanup (these operations require the mainloop to be running -
+    // currently pa_mainloop_iterate has returned; we proceed to perform cleanup using iterate calls)
+    if (g_stream) {
+        pa_stream_disconnect(g_stream);
+        pa_stream_unref(g_stream);
+        g_stream = nullptr;
+    }
+
+    // finalize WAV
+    finalize_wav(g_outfile);
+    g_outfile.close();
+
+    // Move sink-input back
+    int mvback = 0;
+    pa_operation* op_back = pa_context_move_sink_input_by_index(g_ctx, fd.sink_input_index, fd.original_sink_index, success_cb, &mvback);
+    while (pa_operation_get_state(op_back) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+    pa_operation_unref(op_back);
+    if (mvback) {
+        std::cerr << "Moved sink-input back to original sink index " << fd.original_sink_index << "\n";
+    } else {
+        std::cerr << "Failed to move sink-input back (it might have ended). Manual restore may be needed.\n";
+    }
+
+    // unload module
+    if (module_index) {
+        pa_operation* op_unload = pa_context_unload_module(g_ctx, module_index, nullptr, nullptr);
+        while (pa_operation_get_state(op_unload) == PA_OPERATION_RUNNING) pa_mainloop_iterate(g_ml, 1, nullptr);
+        pa_operation_unref(op_unload);
+        std::cerr << "Unloaded module " << module_index << "\n";
+    }
+
+    pa_context_disconnect(g_ctx);
+    pa_context_unref(g_ctx);
+    pa_mainloop_free(g_ml);
+
+    std::cerr << "Done.\n";
+    return 0;
+}
