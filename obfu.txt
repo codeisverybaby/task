@@ -1,0 +1,429 @@
+// Program.cs
+// .NET 7+ console app
+// Features:
+// - Random each run (unless --seed N)
+// - FlagMode=1 (preserve short flags like \b)
+// - --level safe|balanced|aggressive (default balanced)
+// - ExtensionMode = B (obfuscate extension with inner quotes)
+// - --all / --program / --path / --args
+using System;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Collections.Generic;
+using System.Linq;
+
+class Program
+{
+    static readonly string[] DummyPool = new[]
+    {
+        "Windows","WinSxS","System32","Update","Compile","Installer","Package","Temp","Cache",
+        "Build","Microsoft","Runtime","App","Driver","Service","Config","Resources","Upgrade",
+        "Patch","LogFiles"
+    };
+
+    static Random rng;
+    static int DEFAULT_SEED = Environment.TickCount;
+
+    static void Main(string[] args)
+    {
+        if (args.Length == 0)
+        {
+            Console.WriteLine("Usage: obfuscate.exe \"<command>\" [--all] [--program] [--path] [--args] [--seed N] [--level safe|balanced|aggressive]");
+            return;
+        }
+
+        // parse args
+        string input = null;
+        var flags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int seed = DEFAULT_SEED;
+        string level = "balanced";
+        for (int i = 0; i < args.Length; i++)
+        {
+            var a = args[i];
+            if (a.StartsWith("--"))
+            {
+                if (a.Equals("--seed", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    if (int.TryParse(args[i + 1], out int s)) { seed = s; i++; continue; }
+                    else { Console.WriteLine("Invalid seed value."); return; }
+                }
+                if (a.Equals("--level", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                {
+                    level = args[i + 1].ToLowerInvariant();
+                    if (!(level == "safe" || level == "balanced" || level == "aggressive")) { Console.WriteLine("Invalid level. Use safe|balanced|aggressive."); return; }
+                    i++; continue;
+                }
+                flags.Add(a);
+            }
+            else
+            {
+                if (input == null) input = a;
+                else input += " " + a;
+            }
+        }
+
+        rng = new Random(seed);
+
+        bool doProgram = flags.Contains("--program") || flags.Contains("--all");
+        bool doPath = flags.Contains("--path") || flags.Contains("--all");
+        bool doArgs = flags.Contains("--args") || flags.Contains("--all");
+        if (!flags.Any(f => f == "--program" || f == "--path" || f == "--args" || f == "--all"))
+        {
+            doProgram = doPath = doArgs = true;
+        }
+
+        // dummy count based on level
+        int dummyCount = level == "safe" ? rng.Next(1, 3) : (level == "balanced" ? rng.Next(3, 6) : rng.Next(4, 8));
+        bool deep = (level == "aggressive");
+
+        string output = ObfuscateCommand(input, doProgram, doPath, doArgs, dummyCount, deep);
+        Console.WriteLine(output);
+    }
+
+    static string ObfuscateCommand(string cmd, bool doProgram, bool doPath, bool doArgs, int dummyCount, bool deep)
+    {
+        if (string.IsNullOrWhiteSpace(cmd)) return cmd;
+        var tokenPattern = @"(""(?:\\.|[^""])*""|\S+)";
+        var tokens = Regex.Matches(cmd, tokenPattern).Cast<Match>().Select(m => m.Value).ToList();
+        if (tokens.Count == 0) return cmd;
+
+        if (doProgram) tokens[0] = ObfuscateProgramName(tokens[0]);
+
+        for (int i = 1; i < tokens.Count; i++)
+        {
+            string t = tokens[i];
+
+            if (IsShortFlag(t)) { continue; } // FlagMode=1 preserve short flags
+
+            if (doPath && IsLikelyPath(t))
+            {
+                tokens[i] = ObfuscatePathToken(t, dummyCount, deep);
+            }
+            else if (doArgs)
+            {
+                string s = RandomizeCaseOutsideQuotes(t);
+                if (rng.NextDouble() < 0.6) s = InsertSafeInnerQuotes(s);
+                tokens[i] = s;
+            }
+        }
+
+        return RebuildWithOriginalSeparators(cmd, tokenPattern, tokens);
+    }
+
+    static bool IsShortFlag(string token)
+    {
+        string t = token;
+        bool quoted = t.StartsWith("\"") && t.EndsWith("\"");
+        if (quoted) t = t.Substring(1, t.Length - 2);
+        if (t.Length == 2 && (t[0] == '\\' || t[0] == '/' || t[0] == '-')) return true;
+        return false;
+    }
+
+    static bool IsLikelyPath(string token)
+    {
+        string t = token.Trim();
+        bool quoted = t.StartsWith("\"") && t.EndsWith("\"");
+        if (quoted) t = t.Substring(1, t.Length - 2);
+        if (t.Contains("\\") || t.Contains("/")) return true;
+        if (Regex.IsMatch(t, @"^[a-zA-Z]:[\\/]")) return true;
+        if (Regex.IsMatch(t, @"\.(exe|vbs|vbe|ps1|cmd|bat|dll|js|wsf|wsh)$", RegexOptions.IgnoreCase)) return true;
+        return false;
+    }
+
+    static string ObfuscateProgramName(string prog)
+    {
+        bool quoted = prog.StartsWith("\"") && prog.EndsWith("\"");
+        string p = quoted ? prog.Substring(1, prog.Length - 2) : prog;
+
+        string nameOnly = System.IO.Path.GetFileNameWithoutExtension(p);
+        string ext = System.IO.Path.GetExtension(p);
+
+        nameOnly = RandomCase(nameOnly);
+        if (rng.NextDouble() < 0.8) nameOnly = InsertSafeInnerQuotes(nameOnly);
+        string combined = nameOnly + ext;
+        combined = RandomizeCaseOutsideQuotes(combined);
+        if (quoted) combined = "\"" + combined + "\"";
+        return combined;
+    }
+
+    static string ObfuscatePathToken(string token, int dummyCount, bool deep)
+    {
+        bool quoted = token.StartsWith("\"") && token.EndsWith("\"");
+        string t = quoted ? token.Substring(1, token.Length - 2) : token;
+
+        if (t.StartsWith(@"\\"))
+        {
+            string r = ObfuscateUnc(t, dummyCount, deep);
+            return quoted ? "\"" + r + "\"" : r;
+        }
+
+        var m = Regex.Match(t, @"^([a-zA-Z]:)([\\/])?(.*)$");
+        string drive = "";
+        string firstSep = "\\";
+        string remainder = t;
+        if (m.Success)
+        {
+            drive = m.Groups[1].Value;
+            firstSep = m.Groups[2].Success ? m.Groups[2].Value : "\\";
+            remainder = m.Groups[3].Value;
+        }
+
+        var parts = SplitKeepSeparators(remainder);
+        if (parts.Count == 1 && parts[0] == "") { string comb = drive + firstSep; return quoted ? "\"" + comb + "\"" : comb; }
+
+        // choose dummies
+        var pool = DummyPool.ToList();
+        var chosen = new List<string>();
+        for (int i = 0; i < dummyCount; i++)
+        {
+            int idx = rng.Next(pool.Count);
+            chosen.Add(pool[idx]);
+            pool.RemoveAt(idx);
+            if (pool.Count == 0) pool = DummyPool.ToList();
+        }
+
+        var realIndices = new List<int>();
+        for (int i = 0; i < parts.Count; i += 2) realIndices.Add(i);
+        int slots = Math.Max(1, realIndices.Count);
+        int[] perSlot = new int[slots];
+        for (int i = 0; i < dummyCount; i++) perSlot[rng.Next(slots)]++;
+
+        var newParts = new List<string>();
+        int di = 0;
+        for (int sIndex = 0, slot = 0; sIndex < parts.Count; sIndex += 2, slot++)
+        {
+            for (int k = 0; k < perSlot[slot]; k++)
+            {
+                string d = chosen[di % chosen.Count]; di++;
+                string obs = ObfuscateDummySegment(d);
+                string sep = rng.NextDouble() < 0.5 ? "\\" : "/";
+                newParts.Add(obs);
+                newParts.Add(sep);
+                newParts.Add("..");
+                newParts.Add(sep);
+            }
+
+            // For the real segment: if it's the final file (has extension), obfuscate filename+extension with safe transforms (ExtensionMode B)
+            string realSeg = parts[sIndex];
+            if (sIndex == parts.Count - 1 && realSeg.Contains('.'))
+            {
+                realSeg = ObfuscateFilenameWithExt(realSeg); // aggressive on filename+ext but keep resolution correct by not removing filename
+            }
+            else
+            {
+                // For intermediate real segments, we can apply mild obfuscation: random case and sometimes inject a hidden redundant segment and backtrack to keep final resolution
+                if (rng.NextDouble() < 0.5)
+                {
+                    // random case
+                    realSeg = RandomCase(realSeg);
+                }
+                if (rng.NextDouble() < 0.45)
+                {
+                    // Optionally insert pattern: segment\..\segment to increase obfuscation without breaking
+                    string sep = rng.NextDouble() < 0.5 ? "\\" : "/";
+                    newParts.Add(realSeg);
+                    newParts.Add(sep);
+                    newParts.Add(realSeg);
+                    newParts.Add(sep);
+                    newParts.Add("..");
+                    newParts.Add(sep);
+                    continue; // already appended, skip adding below
+                }
+            }
+
+            newParts.Add(realSeg);
+
+            if (sIndex + 1 < parts.Count)
+            {
+                string sepTok = parts[sIndex + 1];
+                if (rng.NextDouble() < 0.25) sepTok = "/";
+                else sepTok = "\\";
+                newParts.Add(sepTok);
+            }
+        }
+
+        var sb = new StringBuilder();
+        foreach (var p in newParts) sb.Append(p);
+        string final = drive + firstSep + sb.ToString();
+        return quoted ? "\"" + final + "\"" : final;
+    }
+
+    static string ObfuscateFilenameWithExt(string filename)
+    {
+        // filename: "test.vbs" or "my.file.vbs" - handle last dot as extension
+        int dot = filename.LastIndexOf('.');
+        if (dot <= 0) return filename;
+
+        string name = filename.Substring(0, dot);
+        string ext = filename.Substring(dot + 1); // without dot
+
+        // Obfuscate name in safe way: random case + occasionally split with quotes (but ensure filename remains intact in literal)
+        string obName = RandomCase(name);
+        if (rng.NextDouble() < 0.7)
+        {
+            // insert inner quotes inside name (not adjacent to dot)
+            for (int tries = 0; tries < 3; tries++)
+            {
+                int pos = rng.Next(1, Math.Max(2, obName.Length - 1));
+                if (obName[pos] == '.' || obName[pos - 1] == '.') continue;
+                obName = obName.Substring(0, pos) + "\"" + obName[pos] + "\"" + obName.Substring(pos + 1);
+                break;
+            }
+        }
+
+        // ExtensionMode B: obfuscate extension by inserting inner quotes + random case
+        string obExt = "";
+        foreach (char c in ext)
+        {
+            if (char.IsLetter(c))
+            {
+                char ch = rng.Next(2) == 0 ? char.ToLower(c) : char.ToUpper(c);
+                obExt += ch;
+            }
+            else obExt += c;
+        }
+        // insert quotes inside extension fairly aggressively (but not adjacent to dot)
+        if (obExt.Length >= 2)
+        {
+            int inserts = 1 + rng.Next(Math.Min(2, obExt.Length / 2));
+            for (int i = 0; i < inserts; i++)
+            {
+                int pos = rng.Next(0, obExt.Length);
+                obExt = obExt.Substring(0, pos) + "\"" + obExt[pos] + "\"" + obExt.Substring(pos + 1);
+            }
+        }
+
+        return obName + "." + obExt;
+    }
+
+    static string ObfuscateUnc(string unc, int dummyCount, bool deep)
+    {
+        var segs = Regex.Split(unc, @"[\\/]").ToList();
+        if (segs.Count < 3) return unc;
+        string server = segs[1];
+        string share = segs[2];
+        var rest = segs.Skip(3).Where(x => x.Length > 0).ToList();
+        if (rest.Count == 0) return unc;
+
+        var pool = DummyPool.ToList();
+        var chosen = new List<string>();
+        for (int i = 0; i < dummyCount; i++)
+        {
+            int idx = rng.Next(pool.Count);
+            chosen.Add(pool[idx]);
+            pool.RemoveAt(idx);
+            if (pool.Count == 0) pool = DummyPool.ToList();
+        }
+
+        int slots = rest.Count;
+        int[] perSlot = new int[slots];
+        for (int i = 0; i < dummyCount; i++) perSlot[rng.Next(slots)]++;
+
+        var built = new List<string>();
+        int di = 0;
+        for (int s = 0; s < rest.Count; s++)
+        {
+            for (int k = 0; k < perSlot[s]; k++)
+            {
+                string d = chosen[di % chosen.Count]; di++;
+                string ob = ObfuscateDummySegment(d);
+                string sep = rng.NextDouble() < 0.5 ? "\\" : "/";
+                built.Add(ob); built.Add(sep); built.Add(".."); built.Add(sep);
+            }
+            // if final and has extension, obfuscate file name
+            if (s == rest.Count - 1 && rest[s].Contains('.'))
+                built.Add(ObfuscateFilenameWithExt(rest[s]));
+            else
+                built.Add(RandomCase(rest[s]));
+            if (s != rest.Count - 1) built.Add("\\");
+        }
+
+        string joined = @"\\" + server + @"\" + share;
+        if (built.Count > 0) joined += @"\" + string.Concat(built);
+        return joined;
+    }
+
+    static string ObfuscateDummySegment(string seg)
+    {
+        var sb = new StringBuilder();
+        foreach (char c in seg)
+        {
+            if (char.IsLetter(c)) sb.Append(rng.Next(2) == 0 ? char.ToLower(c) : char.ToUpper(c));
+            else sb.Append(c);
+        }
+        string s = sb.ToString();
+        if (s.Length > 2 && rng.NextDouble() < 0.8)
+        {
+            int inserts = 1 + rng.Next(Math.Min(2, s.Length / 3));
+            for (int i = 0; i < inserts; i++)
+            {
+                int pos = rng.Next(1, s.Length - 1);
+                if (s[pos] == '.' || s[pos - 1] == '.') continue;
+                s = s.Substring(0, pos) + "\"" + s[pos] + "\"" + s.Substring(pos + 1);
+            }
+        }
+        return s;
+    }
+
+    static string RandomCase(string s)
+    {
+        var sb = new StringBuilder();
+        foreach (char c in s) sb.Append(char.IsLetter(c) ? (rng.Next(2) == 0 ? char.ToLower(c) : char.ToUpper(c)) : c);
+        return sb.ToString();
+    }
+
+    static string RandomizeCaseOutsideQuotes(string s)
+    {
+        var sb = new StringBuilder();
+        bool inQuote = false;
+        foreach (char c in s)
+        {
+            if (c == '"') { sb.Append(c); inQuote = !inQuote; continue; }
+            if (!inQuote && char.IsLetter(c)) sb.Append(rng.Next(2) == 0 ? char.ToLower(c) : char.ToUpper(c));
+            else sb.Append(c);
+        }
+        return sb.ToString();
+    }
+
+    static string InsertSafeInnerQuotes(string s)
+    {
+        if (s.Length < 3) return s;
+        int pos = rng.Next(1, s.Length - 1);
+        if ("\\/:.".Contains(s[pos]) || "\\/:.".Contains(s[pos - 1])) return s;
+        return s.Substring(0, pos) + "\"" + s[pos] + "\"" + s.Substring(pos + 1);
+    }
+
+    static List<string> SplitKeepSeparators(string path)
+    {
+        var res = new List<string>();
+        var sb = new StringBuilder();
+        foreach (char c in path)
+        {
+            if (c == '\\' || c == '/')
+            {
+                res.Add(sb.ToString());
+                sb.Clear();
+                res.Add(c.ToString());
+            }
+            else sb.Append(c);
+        }
+        res.Add(sb.ToString());
+        return res;
+    }
+
+    static string RebuildWithOriginalSeparators(string original, string tokenPattern, List<string> newTokens)
+    {
+        var regex = new Regex(tokenPattern);
+        var sb = new StringBuilder();
+        int last = 0;
+        int idx = 0;
+        foreach (Match m in regex.Matches(original))
+        {
+            if (m.Index > last) sb.Append(original.Substring(last, m.Index - last));
+            sb.Append(newTokens[idx++]);
+            last = m.Index + m.Length;
+        }
+        if (last < original.Length) sb.Append(original.Substring(last));
+        return sb.ToString();
+    }
+}
